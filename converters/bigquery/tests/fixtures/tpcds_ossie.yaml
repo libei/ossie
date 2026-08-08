@@ -1,0 +1,149 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# A trimmed TPC-DS star used as the export golden fixture. It exercises: a
+# composite node KEY, single-column edges, a computed-field property, descriptions
+# + synonyms folded into OPTIONS, a single-table metric (-> MEASURE), and a
+# cross-dataset metric (-> skipped with a warning).
+
+version: "0.2.0.dev0"
+
+semantic_model:
+  - name: tpcds_retail_model
+    description: TPC-DS retail semantic model
+    ai_context:
+      synonyms:
+        - retail analytics
+
+    datasets:
+      - name: store_sales
+        source: tpcds.public.store_sales
+        primary_key: [ss_item_sk, ss_ticket_number]
+        description: Store sales fact table
+        ai_context:
+          synonyms:
+            - sales transactions
+            - POS data
+        fields:
+          - name: ss_item_sk
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ss_item_sk
+            description: Foreign key to item
+          - name: ss_customer_sk
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ss_customer_sk
+          - name: ss_ext_sales_price
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ss_ext_sales_price
+            description: Extended sales price
+          - name: ss_net_profit
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: ss_net_profit
+
+      - name: customer
+        source: tpcds.public.customer
+        primary_key: [c_customer_sk]
+        description: Customer dimension
+        fields:
+          - name: c_customer_sk
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: c_customer_sk
+          - name: c_first_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: c_first_name
+          - name: c_last_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: c_last_name
+          - name: customer_full_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: c_first_name || ' ' || c_last_name
+            description: Customer full name (computed)
+            ai_context:
+              synonyms:
+                - full name
+
+      - name: item
+        source: tpcds.public.item
+        primary_key: [i_item_sk]
+        fields:
+          - name: i_item_sk
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: i_item_sk
+          - name: i_brand
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: i_brand
+                - dialect: ANSI_SQL
+                  expression: i_brand
+            description: Brand name
+
+    relationships:
+      - name: store_sales_to_customer
+        from: store_sales
+        to: customer
+        from_columns: [ss_customer_sk]
+        to_columns: [c_customer_sk]
+        ai_context:
+          synonyms:
+            - who bought
+      - name: store_sales_to_item
+        from: store_sales
+        to: item
+        from_columns: [ss_item_sk]
+        to_columns: [i_item_sk]
+
+    metrics:
+      - name: total_sales
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(store_sales.ss_ext_sales_price)
+        description: Total sales revenue
+        ai_context:
+          synonyms:
+            - gross sales
+            - total revenue
+      - name: total_profit
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(store_sales.ss_net_profit)
+      - name: customer_lifetime_value
+        expression:
+          dialects:
+            - dialect: ANSI_SQL
+              expression: SUM(store_sales.ss_ext_sales_price) / COUNT(DISTINCT customer.c_customer_sk)
+        description: Cross-dataset ratio; not a single MEASURE
