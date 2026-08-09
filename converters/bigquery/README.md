@@ -299,11 +299,13 @@ with two edges — BigQuery's recommended "promote the junction to a node" shape
 BigQuery edge tables carry `PROPERTIES` just like node tables — the columns of
 the `from` base table that describe the relationship instance (when an order was
 placed, its total, and so on). The core spec has no field slot on a relationship
-yet, so edge properties are declared in a `custom_extensions` entry whose JSON
-payload holds a `fields` list of the **exact same shape** as a dataset's
-`fields`. This is deliberately the form a future spec-native
-`relationships[].fields` would take, so promoting it into the core spec later
-needs no change to already-authored models.
+yet, so edge properties are declared in a `custom_extensions` entry — owned by
+the `GOOGLE` vendor, since this is a BigQuery-specific convention until the core
+spec gains one — whose JSON payload holds a `fields` list of the **exact same
+shape** as a dataset's `fields`. This is deliberately the form a future
+spec-native `relationships[].fields` would take, so promoting it into the core
+spec later needs no change to already-authored models. Extensions owned by any
+other vendor are ignored.
 
 ```yaml
 - name: placed_by
@@ -312,7 +314,7 @@ needs no change to already-authored models.
   from_columns: [customer_id]
   to_columns: [customer_id]
   custom_extensions:
-    - vendor_name: COMMON
+    - vendor_name: GOOGLE
       data: |
         {
           "fields": [

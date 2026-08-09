@@ -567,7 +567,7 @@ def _edge_fields_ext(fields):
   """A relationship `custom_extensions` block carrying edge-property fields."""
   return {
       "custom_extensions": [
-          {"vendor_name": "COMMON", "data": json.dumps({"fields": fields})}
+          {"vendor_name": "GOOGLE", "data": json.dumps({"fields": fields})}
       ]
   }
 
@@ -631,11 +631,31 @@ def test_invalid_edge_field_raises_clean_error():
 
 def test_non_json_edge_extension_is_ignored_with_warning():
   rel_extra = {
-      "custom_extensions": [{"vendor_name": "COMMON", "data": "not json{"}]
+      "custom_extensions": [{"vendor_name": "GOOGLE", "data": "not json{"}]
   }
   ossie = _two_ds(rel_extra=rel_extra)
   assert "PROPERTIES" not in _convert(ossie)
   assert any("not valid JSON" in m for m in _warnings_for(ossie))
+
+
+def test_edge_extension_from_another_vendor_is_ignored():
+  # Edge properties are read only from the Google-owned extension. Another
+  # vendor's extension is left untouched even if it carries a `fields` key, and
+  # a malformed payload there raises no warning.
+  rel_extra = {
+      "custom_extensions": [
+          {
+              "vendor_name": "SNOWFLAKE",
+              "data": json.dumps({"fields": [_field("ignored")]}),
+          },
+          {"vendor_name": "DBT", "data": "not json{"},
+      ]
+  }
+  ossie = _two_ds(rel_extra=rel_extra)
+  out = _convert(ossie)
+  assert "PROPERTIES" not in out
+  assert "ignored" not in out
+  assert not any("not valid JSON" in m for m in _warnings_for(ossie))
 
 
 # --- root-node validation --------------------------------------------------

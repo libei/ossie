@@ -429,27 +429,38 @@ def _render_edge_table(from_ds, rel):
   return "\n".join(lines)
 
 
-# Well-known key of the custom-extension payload that carries edge properties.
-# Edge properties have no home in the core spec yet, so a relationship declares
-# them in a `custom_extensions` entry whose JSON payload holds a `fields` list
-# of the exact same shape as a dataset's `fields`. This is deliberately the form
-# a future spec-native `relationships[].fields` would take, so promoting it into
-# the core spec later needs no change to already-authored models.
+# Vendor tag of the custom-extension entry that carries edge properties. This
+# is BigQuery's converter, so the extension is owned by Google rather than the
+# vendor-neutral COMMON namespace -- claiming COMMON for a convention that is
+# not yet standardized would overclaim. Edge properties are read only from this
+# vendor's extension; extensions owned by any other vendor are left untouched.
+_EDGE_FIELDS_VENDOR = "GOOGLE"
+
+# Key, inside that extension's JSON payload, of the `fields` list holding the
+# edge properties. Edge properties have no home in the core spec yet, so the
+# payload holds a `fields` list of the exact same shape as a dataset's `fields`
+# -- deliberately the form a future spec-native `relationships[].fields` would
+# take, so promoting it into the core spec later needs no change to already-
+# authored models.
 _EDGE_FIELDS_KEY = "fields"
 
 
 def _edge_property_fields(rel):
   """Return a relationship's declared edge-property fields as `OSIField`s.
 
-  Reads any `custom_extensions` entry whose JSON payload carries a `fields` list
-  (see `_EDGE_FIELDS_KEY`) and validates each entry with the shared `OSIField`
-  model -- the same validation a node field gets -- so a malformed edge field is
-  reported the same way and both share one rendering path. A relationship with
-  no such extension yields an empty list; a non-JSON payload is ignored with a
+  Reads the relationship's Google-owned custom-extension entry (see
+  `_EDGE_FIELDS_VENDOR`) whose JSON payload carries a `fields` list (see
+  `_EDGE_FIELDS_KEY`) and validates each entry with the shared `OSIField` model
+  -- the same validation a node field gets -- so a malformed edge field is
+  reported the same way and both share one rendering path. Extensions owned by
+  other vendors are left untouched. A relationship with no such extension yields
+  an empty list; a non-JSON payload on this vendor's extension is ignored with a
   warning.
   """
   fields = []
   for ext in rel.custom_extensions or []:
+    if ext.vendor_name != _EDGE_FIELDS_VENDOR:
+      continue
     try:
       payload = json.loads(ext.data)
     except (json.JSONDecodeError, TypeError):

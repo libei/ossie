@@ -108,7 +108,7 @@ semantic_model:
             - ordered by
             - purchased by
         custom_extensions:
-          - vendor_name: COMMON
+          - vendor_name: GOOGLE
             data: |
               {
                 "fields": [
