@@ -325,6 +325,12 @@ metrics:
 BigQuery accepts these aggregates inside `MEASURE()`: **`SUM`, `AVG`, `COUNT`,
 `COUNT(DISTINCT)`, `MIN`, `MAX`**.
 
+A `MEASURE()` can only aggregate columns that the node exposes as properties, so
+the converter **auto-exposes** any column a measure references that no `field`
+already declares (added as a plain property before the measure). A metric like
+`SUM(customer.credit_limit)` therefore works even when `credit_limit` is not
+listed as a dimension `field` — it simply also becomes a queryable property.
+
 Placement follows the number of datasets the expression references:
 
 - **Exactly one dataset** → emitted as a `MEASURE()` on that node. If the body

@@ -91,3 +91,73 @@ def strip_qualifier(expression, dataset):
   return _map_outside_string_literals(
       expression, lambda seg: pattern.sub("", seg)
   )
+
+
+# Identifiers that can appear in an aggregate expression without being column
+# references: SQL keywords and scalar type names. Used to tell a real column
+# apart from syntax when deciding which columns a MEASURE needs exposed as
+# graph properties.
+_NON_COLUMN_WORDS = frozenset({
+    "DISTINCT",
+    "ALL",
+    "AS",
+    "AND",
+    "OR",
+    "NOT",
+    "NULL",
+    "TRUE",
+    "FALSE",
+    "CASE",
+    "WHEN",
+    "THEN",
+    "ELSE",
+    "END",
+    "IN",
+    "IS",
+    "LIKE",
+    "BETWEEN",
+    "CAST",
+    "SAFE_CAST",
+    "INTERVAL",
+    "OVER",
+    # scalar type names (e.g. inside CAST(x AS INT64))
+    "INT64",
+    "FLOAT64",
+    "NUMERIC",
+    "BIGNUMERIC",
+    "STRING",
+    "BOOL",
+    "BOOLEAN",
+    "BYTES",
+    "DATE",
+    "DATETIME",
+    "TIME",
+    "TIMESTAMP",
+    "GEOGRAPHY",
+    "JSON",
+    "ARRAY",
+    "STRUCT",
+})
+
+_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def referenced_columns(expression):
+  """Return the column identifiers referenced in a (table-local) SQL expression,
+
+  in first-appearance order. Ignores text inside string literals, function-name
+  identifiers (one immediately followed by `(`), and SQL keywords / type names.
+  A heuristic, not a full parser -- enough to know which columns a MEASURE needs
+  exposed as graph properties.
+  """
+  scannable = _blank_string_literals(expression)
+  out = []
+  for m in _IDENT_RE.finditer(scannable):
+    name = m.group(0)
+    if scannable[m.end() :].lstrip().startswith("("):
+      continue  # function call, not a column reference
+    if name.upper() in _NON_COLUMN_WORDS:
+      continue
+    if name not in out:
+      out.append(name)
+  return out

@@ -50,7 +50,7 @@ from ._common import (
     require_str,
     synonyms_of,
 )
-from ._expr import referenced_datasets, strip_qualifier
+from ._expr import referenced_columns, referenced_datasets, strip_qualifier
 
 # All generated indentation flows through this single mechanism: one nesting
 # level == one INDENT. Keeping every indent derived from `depth` (rather than
@@ -59,6 +59,12 @@ _INDENT = "  "
 
 # A bare, unquoted identifier that needs no backticks.
 _SIMPLE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+# One dotted component of a `project.dataset.table` reference. Unlike a bare
+# identifier this also permits hyphens, since GCP project IDs commonly contain
+# them (e.g. `sqlgen-testing`); such a reference is still a valid base table once
+# the whole path is backtick-quoted.
+_TABLE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
 def convert_ossie_to_bq_graph(ossie_yaml_str):
@@ -218,9 +224,10 @@ def _place_metric(model_name, metric, datasets, measures_by_dataset):
   opts = _options_clause(
       description_of(metric), synonyms_of(metric.get("ai_context"))
   )
-  measures_by_dataset.setdefault(dataset, []).append(
-      f"{measure} {opts}" if opts else measure
-  )
+  measures_by_dataset.setdefault(dataset, []).append({
+      "ddl": f"{measure} {opts}" if opts else measure,
+      "columns": referenced_columns(body),
+  })
 
 
 def _starts_with_supported_aggregate(body):
@@ -230,9 +237,26 @@ def _starts_with_supported_aggregate(body):
 
 def _render_node_table(name, ds, measures):
   table = _qualify_table(require_str(ds, "source", f"dataset '{name}'"), name)
-  properties = [_render_field_property(name, f) for f in ds.get("fields") or []]
-  properties = [p for p in properties if p is not None]
-  properties.extend(measures)
+
+  properties = []
+  exposed = set()
+  for field in ds.get("fields") or []:
+    rendered = _render_field_property(name, field)
+    if rendered is None:
+      continue
+    properties.append(rendered)
+    exposed.add(field["name"])
+
+  # A BigQuery graph MEASURE can only aggregate columns that are exposed as
+  # properties. Expose any column a measure references that no field already
+  # declares, so e.g. MEASURE(SUM(credit_limit)) works even when credit_limit
+  # is not itself listed as a dimension field.
+  for measure in measures:
+    for col in measure["columns"]:
+      if col not in exposed:
+        properties.append(col)
+        exposed.add(col)
+  properties.extend(measure["ddl"] for measure in measures)
 
   lines = [
       _line(2, f"{table} AS {name}"),
@@ -357,7 +381,7 @@ def _qualify_table(source, context):
   """
   s = source.strip()
   parts = s.split(".")
-  if not all(_SIMPLE_IDENT_RE.match(p.strip("`")) for p in parts):
+  if not all(_TABLE_PART_RE.match(p.strip("`")) for p in parts):
     _warn(
         context,
         f"source '{source}' is not a plain project.dataset.table "

@@ -190,6 +190,19 @@ def test_source_must_be_dotted_identifier_warns():
   assert any("not a plain project.dataset.table" in m for m in msgs)
 
 
+def test_hyphenated_project_id_is_backtick_wrapped_without_warning():
+  # GCP project IDs commonly contain hyphens (e.g. `my-proj`); such a source is
+  # a valid base table and must be quoted, not rejected as a non-identifier.
+  ossie = _model(
+      [{"name": "f", "source": "my-proj.ds.tbl", "primary_key": ["k"]}]
+  )
+  out = _convert(ossie)
+  assert "`my-proj.ds.tbl` AS f" in out
+  assert not any(
+      "not a plain project.dataset.table" in m for m in _warnings_for(ossie)
+  )
+
+
 # --- field properties ------------------------------------------------------
 
 
@@ -271,6 +284,36 @@ def _one_fact(metric_expr, name="rev"):
 def test_single_table_metric_becomes_measure():
   out = _convert(_one_fact("SUM(orders.amount)"))
   assert "MEASURE(SUM(amount)) AS rev" in out
+
+
+def test_measure_column_is_auto_exposed_as_property():
+  # BigQuery rejects a MEASURE that aggregates a column not exposed as a
+  # property, so a measure column no field declares must be added as one.
+  out = _convert(_one_fact("SUM(orders.amount)"))
+  assert re.search(r"^\s+amount,\s*$", out, re.MULTILINE)  # bare property
+  # ordering: the exposed column precedes the MEASURE that needs it
+  assert out.index("\n        amount,") < out.index("MEASURE(SUM(amount))")
+
+
+def test_measure_reusing_a_declared_field_adds_no_duplicate_property():
+  ossie = _model(
+      [{
+          "name": "orders",
+          "source": "c.s.orders",
+          "primary_key": ["k"],
+          "fields": [_field("amount")],
+      }],
+      metrics=[{"name": "rev", "expression": _expr("SUM(orders.amount)")}],
+  )
+  out = _convert(ossie)
+  # `amount` is declared once; the measure reuses it, no second property line
+  assert out.count("\n        amount,") == 1
+
+
+def test_measure_over_multiple_columns_exposes_each():
+  out = _convert(_one_fact("SUM(orders.qty * orders.price)"))
+  assert re.search(r"^\s+qty,\s*$", out, re.MULTILINE)
+  assert re.search(r"^\s+price,\s*$", out, re.MULTILINE)
 
 
 def test_measure_strips_only_the_owning_qualifier():
