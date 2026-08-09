@@ -119,18 +119,19 @@ def convert_ossie_to_bq_graph(ossie_yaml_str):
         f"Unsupported Apache Ossie version '{version}'. Supported:"
         f" {OSSIE_VERSION}"
     )
-  document = _validate(raw)
+  document = _parse_document(raw)
   if not document.semantic_model:
     raise ConversionError("'semantic_model' must be a non-empty list")
   if len(document.semantic_model) > 1:
     _warn("model", "multiple semantic models found; converting only the first")
-  return _convert_model(document.semantic_model[0])
+  return _render_property_graph(document.semantic_model[0])
 
 
 def _load_yaml(text):
-  """Parse YAML text, surfacing a syntax error as a ConversionError.
+  """Parse YAML text into a Python object, or raise ConversionError.
 
-  Callers (and the CLI) then get a clean message rather than a raw traceback.
+  Wraps a YAML syntax error so callers (and the CLI) get a clean message rather
+  than a raw traceback.
   """
   try:
     return yaml.safe_load(text)
@@ -138,13 +139,13 @@ def _load_yaml(text):
     raise ConversionError(f"Invalid YAML: {e}") from e
 
 
-def _validate(raw):
-  """Structurally validate the raw model against the core Ossie schema.
+def _parse_document(raw):
+  """Validate a raw model mapping and return it as an `OSIDocument`.
 
-  Delegates to the shared `apache-ossie` pydantic models (`OSIDocument`), so
-  required-field, type, and dialect-enum checks are owned by the core package
-  rather than re-implemented here. A schema violation is re-raised as a
-  ConversionError carrying pydantic's field-level report.
+  Delegates to the shared `apache-ossie` pydantic models, so required-field,
+  type, and dialect-enum checks are owned by the core package rather than
+  re-implemented here. A schema violation is re-raised as a ConversionError
+  carrying pydantic's field-level report.
   """
   try:
     return OSIDocument.model_validate(raw)
@@ -152,11 +153,18 @@ def _validate(raw):
     raise ConversionError(f"Invalid Apache Ossie model:\n{e}") from e
 
 
-def _warn(scope, msg):
-  warnings.warn(f"[{scope}] {msg}", stacklevel=2)
+def _warn(scope, message):
+  """Emit a stderr warning tagged with the element `scope` it concerns."""
+  warnings.warn(f"[{scope}] {message}", stacklevel=2)
 
 
-def _convert_model(model):
+def _render_property_graph(model):
+  """Render one semantic model as a `CREATE OR REPLACE PROPERTY GRAPH` string.
+
+  Builds the NODE TABLES clause (one entry per dataset with a primary key), the
+  EDGE TABLES clause (one entry per relationship between kept datasets), and a
+  graph-level OPTIONS clause, then joins them into the final statement.
+  """
   if not model.datasets:
     raise ConversionError(
         f"Model '{model.name}': 'datasets' must be a non-empty list"
@@ -165,7 +173,7 @@ def _convert_model(model):
   if len(datasets) != len(model.datasets):
     # The schema does not enforce unique dataset names, but a graph needs
     # distinct node labels; a duplicate would collide on `AS <label>`.
-    dupes = _duplicates(ds.name for ds in model.datasets)
+    dupes = _duplicate_names(ds.name for ds in model.datasets)
     raise ConversionError(
         f"Model '{model.name}': duplicate dataset name"
         f" {', '.join(repr(d) for d in dupes)}"
@@ -175,10 +183,10 @@ def _convert_model(model):
   # cannot form a valid node, so skip it (and any edge that references it)
   # rather than emit an invalid `KEY()`.
   skipped = set()
-  valid = []
+  node_names = []
   for ds in model.datasets:
     if ds.primary_key:
-      valid.append(ds.name)
+      node_names.append(ds.name)
     else:
       _warn(
           ds.name,
@@ -186,7 +194,7 @@ def _convert_model(model):
           "(a graph node requires a KEY)",
       )
       skipped.add(ds.name)
-  if not valid:
+  if not node_names:
     _warn(
         "model",
         "every dataset was skipped (no primary_key); "
@@ -197,11 +205,11 @@ def _convert_model(model):
   # references. Measures placed on a skipped dataset simply never render.
   measures_by_dataset = {}
   for metric in model.metrics or []:
-    _place_metric(metric, datasets, measures_by_dataset)
+    _register_metric_measure(metric, datasets, measures_by_dataset)
 
   node_tables = [
       _render_node_table(datasets[name], measures_by_dataset.get(name, []))
-      for name in valid
+      for name in node_names
   ]
 
   edge_tables = []
@@ -224,21 +232,23 @@ def _convert_model(model):
     edge_tables.append(_render_edge_table(datasets[frm], rel))
     kept_edges.append((frm, to))
 
-  _validate_single_root(valid, kept_edges)
+  _warn_unless_single_root(node_names, kept_edges)
 
   blocks = [
-      f"CREATE OR REPLACE PROPERTY GRAPH {_qualify_graph(model.name)}",
+      f"CREATE OR REPLACE PROPERTY GRAPH {_qualify_graph_name(model.name)}",
       _render_tables_clause("NODE TABLES", node_tables),
   ]
   if edge_tables:
     blocks.append(_render_tables_clause("EDGE TABLES", edge_tables))
-  graph_opts = _options_clause(_description_of(model), _synonyms_of(model))
+  graph_opts = _render_options_clause(
+      _element_description(model), _element_synonyms(model)
+  )
   if graph_opts:
-    blocks.append(_line(1, graph_opts))
+    blocks.append(_indented_line(1, graph_opts))
   return "\n".join(blocks) + ";\n"
 
 
-def _duplicates(names):
+def _duplicate_names(names):
   """Return the names that appear more than once, in first-seen order."""
   seen = set()
   dupes = []
@@ -249,7 +259,15 @@ def _duplicates(names):
   return dupes
 
 
-def _place_metric(metric, datasets, measures_by_dataset):
+def _register_metric_measure(metric, datasets, measures_by_dataset):
+  """Record a metric as a MEASURE under the single dataset it aggregates.
+
+  Resolves the metric's SQL, finds the one dataset its columns reference, and
+  appends a rendered MEASURE (plus the columns it needs exposed) to
+  `measures_by_dataset[dataset]`. A metric that resolves to no SQL, or whose
+  aggregate spans zero or several datasets, cannot be a single MEASURE and is
+  skipped with a warning.
+  """
   expr = _pick_expression(metric.expression, f"metric '{metric.name}'")
   if expr is None:
     _warn(
@@ -258,7 +276,7 @@ def _place_metric(metric, datasets, measures_by_dataset):
     )
     return
 
-  referenced = _referenced_datasets(expr, datasets.keys())
+  referenced = _find_referenced_datasets(expr, datasets.keys())
   if len(referenced) != 1:
     detail = (
         "references no known dataset"
@@ -272,7 +290,7 @@ def _place_metric(metric, datasets, measures_by_dataset):
     return
 
   dataset = referenced[0]
-  body = _strip_qualifier(expr, dataset).strip()
+  body = _strip_dataset_qualifier(expr, dataset).strip()
   if not _starts_with_supported_aggregate(body):
     _warn(
         metric.name,
@@ -281,20 +299,29 @@ def _place_metric(metric, datasets, measures_by_dataset):
     )
 
   measure = f"MEASURE({body}) AS {metric.name}"
-  opts = _options_clause(_description_of(metric), _synonyms_of(metric))
+  opts = _render_options_clause(
+      _element_description(metric), _element_synonyms(metric)
+  )
   measures_by_dataset.setdefault(dataset, []).append({
       "ddl": f"{measure} {opts}" if opts else measure,
-      "columns": _referenced_columns(body),
+      "columns": _find_referenced_columns(body),
   })
 
 
 def _render_node_table(ds, measures):
-  table = _qualify_table(ds.source, ds.name)
+  """Render one dataset as a NODE TABLE entry: `<table> AS <label>` plus its
+
+  KEY, optional label OPTIONS, and PROPERTIES clause.
+
+  `measures` are the rendered MEASURE entries already assigned to this dataset
+  (see `_register_metric_measure`); each is added to the PROPERTIES clause.
+  """
+  table = _qualify_table_name(ds.source, ds.name)
 
   properties = []
   exposed = set()
   for field in ds.fields or []:
-    rendered = _render_field_property(ds.name, field)
+    rendered = _render_property_from_field(ds.name, field)
     if rendered is None:
       continue
     properties.append(rendered)
@@ -312,18 +339,25 @@ def _render_node_table(ds, measures):
   properties.extend(measure["ddl"] for measure in measures)
 
   lines = [
-      _line(2, f"{table} AS {ds.name}"),
-      _line(3, f"KEY({', '.join(ds.primary_key)})"),
+      _indented_line(2, f"{table} AS {ds.name}"),
+      _indented_line(3, f"KEY({', '.join(ds.primary_key)})"),
   ]
-  label = _label_options(ds)
+  label = _render_default_label_clause(ds)
   if label:
-    lines.append(_line(3, label))
+    lines.append(_indented_line(3, label))
   if properties:
     lines.append(_render_properties_clause(properties))
   return "\n".join(lines)
 
 
-def _render_field_property(dataset, field):
+def _render_property_from_field(dataset, field):
+  """Render one Ossie field as an entry of a node table's PROPERTIES clause.
+
+  A BigQuery graph property is emitted as a bare column when the field's
+  expression is just that column, otherwise as `<expr> AS <name>`, with an
+  optional trailing OPTIONS clause. Returns None (and warns) when the field has
+  no BigQuery-convertible expression, so the caller drops it.
+  """
   expr = _pick_expression(
       field.expression, f"dataset '{dataset}': field '{field.name}'"
   )
@@ -336,62 +370,75 @@ def _render_field_property(dataset, field):
     return None
   # A bare column when the expression is just the column, else `<expr> AS
   # <name>`.
-  local = _strip_qualifier(expr, dataset).strip()
+  local = _strip_dataset_qualifier(expr, dataset).strip()
   prop = field.name if local == field.name else f"{local} AS {field.name}"
-  opts = _options_clause(_description_of(field), _synonyms_of(field))
+  opts = _render_options_clause(
+      _element_description(field), _element_synonyms(field)
+  )
   return f"{prop} {opts}" if opts else prop
 
 
 def _render_edge_table(from_ds, rel):
+  """Render one relationship as an EDGE TABLE entry.
+
+  The edge is backed by the `from` (many) dataset's base table, which holds the
+  foreign-key columns. Its SOURCE KEY references the `from` node's primary key
+  and its DESTINATION KEY references the `to` node's join columns.
+  """
   from_cols = _require_columns(rel.from_columns, rel.name, "from_columns")
   to_cols = _require_columns(rel.to_columns, rel.name, "to_columns")
 
-  backing = _qualify_table(from_ds.source, from_ds.name)
+  backing = _qualify_table_name(from_ds.source, from_ds.name)
   # Direct foreign-key edge: backed by the `from` (many) dataset's base table,
   # which holds the FK columns. It is its own source node; its primary key is
   # both the edge key and the SOURCE KEY.
   source_key = from_ds.primary_key
 
   lines = [
-      _line(2, f"{backing} AS {rel.name}"),
-      _line(3, f"KEY({', '.join(source_key)})"),
-      _line(
+      _indented_line(2, f"{backing} AS {rel.name}"),
+      _indented_line(3, f"KEY({', '.join(source_key)})"),
+      _indented_line(
           3,
           f"SOURCE KEY ({', '.join(source_key)}) REFERENCES"
           f" {rel.from_dataset} ({', '.join(source_key)})",
       ),
-      _line(
+      _indented_line(
           3,
           f"DESTINATION KEY ({', '.join(from_cols)}) REFERENCES"
           f" {rel.to} ({', '.join(to_cols)})",
       ),
   ]
-  label = _label_options(rel)
+  label = _render_default_label_clause(rel)
   if label:
-    lines.append(_line(3, label))
+    lines.append(_indented_line(3, label))
   return "\n".join(lines)
 
 
-def _require_columns(cols, rel_name, key):
+def _require_columns(cols, rel_name, field_name):
+  """Return `cols`, or raise ConversionError if it is empty.
+
+  `field_name` names the relationship field (e.g. "from_columns") for the error
+  message.
+  """
   if not cols:
     raise ConversionError(
-        f"relationship '{rel_name}': '{key}' must be a non-empty list of"
+        f"relationship '{rel_name}': '{field_name}' must be a non-empty list of"
         " column names"
     )
   return cols
 
 
-def _validate_single_root(valid, edges):
+def _warn_unless_single_root(node_names, edges):
   """Warn unless exactly one node table is a root (referenced by no edge).
 
   BigQuery requires exactly one root node table -- for an FK graph, the dataset
   that is never an edge destination. This is a query-time constraint, so it is
   a warning rather than an error.
   """
-  if not valid:
+  if not node_names:
     return
   destinations = {to for _, to in edges}
-  roots = [name for name in valid if name not in destinations]
+  roots = [name for name in node_names if name not in destinations]
   if len(roots) != 1:
     detail = (
         "no root node table"
@@ -414,13 +461,14 @@ def _validate_single_root(valid, edges):
 # text. Every expression here is already BigQuery SQL (see `_pick_expression`).
 
 
-def _pick_expression(expression, what):
+def _pick_expression(expression, context_label):
   """Return BigQuery SQL for an Ossie expression, or None if it has none.
 
   A BigQuery or ANSI_SQL dialect is used verbatim (BigQuery is an ANSI
   superset); any other SQL dialect is transpiled to BigQuery with sqlglot.
   Non-SQL dialects (e.g. MDX, MAQL) have no BigQuery rendering and yield None,
-  leaving the caller to warn and skip.
+  leaving the caller to warn and skip. `context_label` names the element being
+  converted and is used only in any transpile warning.
   """
   by_dialect = {d.dialect: d.expression for d in expression.dialects}
   for dialect in _VERBATIM_DIALECTS:
@@ -437,7 +485,7 @@ def _pick_expression(expression, what):
       continue
     name = _sqlglot_dialect(d.dialect)
     if name is not None:
-      return _transpile(d.expression, name, what)
+      return _transpile_to_bigquery(d.expression, name, context_label)
   return None
 
 
@@ -457,41 +505,42 @@ def _sqlglot_dialect(dialect):
   return name
 
 
-def _transpile(sql, read_dialect, what):
+def _transpile_to_bigquery(sql, read_dialect, context_label):
   """Transpile `sql` from `read_dialect` to BigQuery.
 
   Rewrites dialect-specific constructs BigQuery does not share (conditional and
   null-handling functions, quoting, and the like) into their BigQuery form. If
   sqlglot cannot parse the expression, it is passed through unchanged with a
-  warning rather than dropped.
+  warning rather than dropped. `context_label` names the element being converted
+  and is used only in that warning.
   """
   try:
     return sqlglot.transpile(sql, read=read_dialect, write=_BIGQUERY)[0]
   except sqlglot.errors.SqlglotError:
     _warn(
-        what,
+        context_label,
         f"could not transpile expression to BigQuery: {sql!r}; "
         "emitting unchanged",
     )
     return sql
 
 
-def _parse(expression):
-  """Parse a BigQuery SQL expression into a sqlglot tree, or None."""
+def _parse_sql(expression):
+  """Parse a BigQuery SQL expression into a sqlglot syntax tree, or None."""
   try:
     return sqlglot.parse_one(expression, dialect=_BIGQUERY)
   except sqlglot.errors.SqlglotError:
     return None
 
 
-def _referenced_datasets(expression, dataset_names):
+def _find_referenced_datasets(expression, dataset_names):
   """Return the datasets whose columns `expression` references, in order.
 
   Only names in `dataset_names` are returned, de-duplicated. A measure binds to
   one table, so a metric referencing zero or several datasets cannot become a
   single MEASURE.
   """
-  tree = _parse(expression)
+  tree = _parse_sql(expression)
   if tree is None:
     return []
   allowed = set(dataset_names)
@@ -503,14 +552,14 @@ def _referenced_datasets(expression, dataset_names):
   return found
 
 
-def _strip_qualifier(expression, dataset):
+def _strip_dataset_qualifier(expression, dataset):
   """Return `expression` with `<dataset>.` column qualifiers removed.
 
   Rewrites e.g. `SUM(orders.amount)` to `SUM(amount)` so the expression is
   local to its owning node table. Columns qualified by any other name are left
   intact; an unparseable expression is returned unchanged.
   """
-  tree = _parse(expression)
+  tree = _parse_sql(expression)
   if tree is None:
     return expression
   for column in tree.find_all(sqlglot_exp.Column):
@@ -519,9 +568,9 @@ def _strip_qualifier(expression, dataset):
   return tree.sql(dialect=_BIGQUERY)
 
 
-def _referenced_columns(expression):
+def _find_referenced_columns(expression):
   """Return the bare column names `expression` references, in order."""
-  tree = _parse(expression)
+  tree = _parse_sql(expression)
   if tree is None:
     return []
   names = []
@@ -532,6 +581,7 @@ def _referenced_columns(expression):
 
 
 def _starts_with_supported_aggregate(body):
+  """Return True if `body` begins with a call to a SUPPORTED_AGGREGATES func."""
   m = re.match(r"^([A-Za-z_]+)\s*\(", body.lstrip())
   return bool(m) and m.group(1).upper() in SUPPORTED_AGGREGATES
 
@@ -539,22 +589,27 @@ def _starts_with_supported_aggregate(body):
 # --- identifiers, metadata, and layout --------------------------------------
 
 
-def _qualify_graph(name):
+def _qualify_graph_name(name):
+  """Return the graph name, backtick-quoted only if it is not a bare
+
+  identifier.
+  """
   return name if _SIMPLE_IDENT_RE.match(name) else f"`{name}`"
 
 
-def _qualify_table(source, context):
+def _qualify_table_name(source, context_label):
   """Backtick-quote a `project.dataset.table` reference.
 
   Apache Ossie sources are already fully qualified dotted identifiers, so the
-  whole reference is wrapped once. Warns on a source that is not a plain dotted
-  identifier (e.g. a subquery), which cannot back a graph node table.
+  whole reference is wrapped once. Warns (tagged with `context_label`, the
+  dataset name) on a source that is not a plain dotted identifier (e.g. a
+  subquery), which cannot back a graph node table.
   """
   s = source.strip()
   parts = s.split(".")
   if not all(_TABLE_PART_RE.match(p.strip("`")) for p in parts):
     _warn(
-        context,
+        context_label,
         f"source '{source}' is not a plain project.dataset.table "
         "identifier; a graph node table requires a base table",
     )
@@ -562,7 +617,8 @@ def _qualify_table(source, context):
   return "`" + ".".join(p.strip("`") for p in parts) + "`"
 
 
-def _line(depth, text):
+def _indented_line(depth, text):
+  """Return `text` prefixed with `depth` levels of indentation."""
   return _INDENT * depth + text
 
 
@@ -575,16 +631,18 @@ def _render_tables_clause(keyword, entries):
   -- BigQuery's canonical graph layout.
   """
   inner = ",\n".join(entries)
-  return f"{_line(1, keyword + ' (')}\n{inner}\n{_line(1, ')')}"
+  return (
+      f"{_indented_line(1, keyword + ' (')}\n{inner}\n{_indented_line(1, ')')}"
+  )
 
 
 def _render_properties_clause(properties):
   """Render a node table's `PROPERTIES(...)` clause from rendered entries."""
-  body = ",\n".join(_line(4, p) for p in properties)
-  return f"{_line(3, 'PROPERTIES(')}\n{body}\n{_line(3, ')')}"
+  body = ",\n".join(_indented_line(4, p) for p in properties)
+  return f"{_indented_line(3, 'PROPERTIES(')}\n{body}\n{_indented_line(3, ')')}"
 
 
-def _string_literal(value):
+def _render_string_literal(value):
   """Render a Python string as a BigQuery double-quoted string literal.
 
   Escapes the backslash, the quote, and control characters so a multi-line
@@ -600,7 +658,7 @@ def _string_literal(value):
   return f'"{escaped}"'
 
 
-def _options_clause(description, synonyms):
+def _render_options_clause(description, synonyms):
   """Render an `OPTIONS(...)` clause from a description and/or synonyms.
 
   BigQuery Graph exposes both as first-class label and property options
@@ -609,42 +667,50 @@ def _options_clause(description, synonyms):
   """
   parts = []
   if description:
-    parts.append(f"description={_string_literal(description)}")
+    parts.append(f"description={_render_string_literal(description)}")
   if synonyms:
-    rendered = ", ".join(_string_literal(s) for s in synonyms)
+    rendered = ", ".join(_render_string_literal(s) for s in synonyms)
     parts.append(f"synonyms=[{rendered}]")
   return f"OPTIONS({', '.join(parts)})" if parts else None
 
 
-def _label_options(obj):
+def _render_default_label_clause(element):
   """Return the `DEFAULT LABEL OPTIONS(...)` clause for a node or edge, or None.
 
   BigQuery attaches an element's description and synonyms to its default label,
-  between the KEY clause and PROPERTIES.
+  between the KEY clause and PROPERTIES. `element` is the Ossie dataset or
+  relationship being rendered.
   """
-  opts = _options_clause(_description_of(obj), _synonyms_of(obj))
+  opts = _render_options_clause(
+      _element_description(element), _element_synonyms(element)
+  )
   return f"DEFAULT LABEL {opts}" if opts else None
 
 
-def _description_of(obj):
-  """Return a trimmed description for an Apache Ossie object, or None.
+def _element_description(element):
+  """Return the description text for an Ossie model element, or None.
 
-  A string-form `ai_context` (the schema allows a string or a structured
-  object) has no options key of its own, so it is folded into the description.
+  `element` is any Ossie object that may carry `description`/`ai_context` (a
+  model, dataset, field, relationship, or metric). A string-form `ai_context`
+  (the schema allows a string or a structured object) has no options key of its
+  own, so it is folded into the description.
   """
   parts = []
-  desc = getattr(obj, "description", None)
+  desc = getattr(element, "description", None)
   if isinstance(desc, str) and desc.strip():
     parts.append(desc.strip())
-  ai = getattr(obj, "ai_context", None)
+  ai = getattr(element, "ai_context", None)
   if isinstance(ai, str) and ai.strip():
     parts.append(ai.strip())
   return "\n".join(parts) if parts else None
 
 
-def _synonyms_of(obj):
-  """Return the synonyms from an object's structured `ai_context`, else []."""
-  ai = getattr(obj, "ai_context", None)
+def _element_synonyms(element):
+  """Return the synonyms from an Ossie element's structured `ai_context`, else
+
+  an empty list. `element` is any Ossie object that may carry `ai_context`.
+  """
+  ai = getattr(element, "ai_context", None)
   if isinstance(ai, OSIAIContextObject):
     return list(ai.synonyms or [])
   return []
