@@ -39,11 +39,11 @@ def load_fixture(name):
   return (_FIXTURES / name).read_text()
 
 
-def _expr(sql, dialect="ANSI_SQL"):
+def _expr(sql, dialect="BIGQUERY"):
   return {"dialects": [{"dialect": dialect, "expression": sql}]}
 
 
-def _field(name, sql=None, dialect="ANSI_SQL", **extra):
+def _field(name, sql=None, dialect="BIGQUERY", **extra):
   f = {
       "name": name,
       "expression": _expr(sql if sql is not None else name, dialect),
@@ -572,13 +572,13 @@ def _edge_fields_ext(fields):
   }
 
 
-def test_edge_properties_export_matches_golden():
-  out = _convert(load_fixture("edge_properties_ossie.yaml"))
-  assert out == load_fixture("edge_properties_graph.sql")
+def test_orders_graph_export_matches_golden():
+  out = _convert(load_fixture("orders_ossie.yaml"))
+  assert out == load_fixture("orders_graph.sql")
 
 
-def test_edge_properties_export_is_warning_free():
-  assert _warnings_for(load_fixture("edge_properties_ossie.yaml")) == []
+def test_orders_graph_export_is_warning_free():
+  assert _warnings_for(load_fixture("orders_ossie.yaml")) == []
 
 
 def test_relationship_without_edge_fields_emits_no_properties():

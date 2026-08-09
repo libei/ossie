@@ -44,7 +44,7 @@ semantic_model:
       - name: orders
         source: shop.public.orders
         primary_key: [order_id]
-        description: Order fact table
+        description: An order placed by a customer
         ai_context:
           synonyms:
             - orders
@@ -53,18 +53,18 @@ semantic_model:
           - name: order_id
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: order_id
-            description: Order surrogate key
+            description: Unique identifier for the order
             ai_context:
               synonyms:
                 - order number
           - name: customer_id
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: customer_id
-            description: Foreign key to customer
+            description: The customer who placed the order
             ai_context:
               synonyms:
                 - buyer id
@@ -72,7 +72,7 @@ semantic_model:
       - name: customer
         source: shop.public.customer
         primary_key: [customer_id]
-        description: Customer dimension
+        description: A customer who places orders
         ai_context:
           synonyms:
             - customers
@@ -81,16 +81,16 @@ semantic_model:
           - name: customer_id
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: customer_id
-            description: Customer surrogate key
+            description: Unique identifier for the customer
             ai_context:
               synonyms:
                 - customer number
           - name: customer_name
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: customer_name
             description: Customer full name
             ai_context:
@@ -116,7 +116,7 @@ semantic_model:
                     "name": "order_date",
                     "expression": {
                       "dialects": [
-                        {"dialect": "ANSI_SQL", "expression": "order_date"}
+                        {"dialect": "BIGQUERY", "expression": "order_date"}
                       ]
                     },
                     "description": "When the order was placed",
@@ -126,7 +126,7 @@ semantic_model:
                     "name": "order_total",
                     "expression": {
                       "dialects": [
-                        {"dialect": "ANSI_SQL", "expression": "order_total"}
+                        {"dialect": "BIGQUERY", "expression": "order_total"}
                       ]
                     },
                     "description": "Total amount of the order",

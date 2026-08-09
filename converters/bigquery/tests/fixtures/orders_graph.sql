@@ -2,16 +2,16 @@ CREATE OR REPLACE PROPERTY GRAPH orders_graph
   NODE TABLES (
     `shop.public.orders` AS orders
       KEY(order_id)
-      DEFAULT LABEL OPTIONS(description="Order fact table", synonyms=["orders", "sales orders"])
+      DEFAULT LABEL OPTIONS(description="An order placed by a customer", synonyms=["orders", "sales orders"])
       PROPERTIES(
-        order_id OPTIONS(description="Order surrogate key", synonyms=["order number"]),
-        customer_id OPTIONS(description="Foreign key to customer", synonyms=["buyer id"])
+        order_id OPTIONS(description="Unique identifier for the order", synonyms=["order number"]),
+        customer_id OPTIONS(description="The customer who placed the order", synonyms=["buyer id"])
       ),
     `shop.public.customer` AS customer
       KEY(customer_id)
-      DEFAULT LABEL OPTIONS(description="Customer dimension", synonyms=["customers", "buyers"])
+      DEFAULT LABEL OPTIONS(description="A customer who places orders", synonyms=["customers", "buyers"])
       PROPERTIES(
-        customer_id OPTIONS(description="Customer surrogate key", synonyms=["customer number"]),
+        customer_id OPTIONS(description="Unique identifier for the customer", synonyms=["customer number"]),
         customer_name OPTIONS(description="Customer full name", synonyms=["name"])
       )
   )

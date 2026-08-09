@@ -552,7 +552,7 @@ uv run pytest
 
 The test suite includes two golden-file exports
 (`tests/fixtures/tpcds_ossie.yaml` → `tests/fixtures/tpcds_graph.sql`, and
-`tests/fixtures/edge_properties_ossie.yaml` →
-`tests/fixtures/edge_properties_graph.sql` for edge properties) plus unit tests
+`tests/fixtures/orders_ossie.yaml` → `tests/fixtures/orders_graph.sql` for edge
+properties) plus unit tests
 for measure placement, edge keys and edge properties, root validation, dialect
 selection and transpilation, and OPTIONS (description + synonyms) emission.

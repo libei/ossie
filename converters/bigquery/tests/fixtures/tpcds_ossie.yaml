@@ -47,7 +47,7 @@ semantic_model:
           - name: ss_item_sk
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: ss_item_sk
             description: Foreign key to item
             ai_context:
@@ -57,7 +57,7 @@ semantic_model:
           - name: ss_customer_sk
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: ss_customer_sk
             description: Foreign key to customer
             ai_context:
@@ -67,7 +67,7 @@ semantic_model:
           - name: ss_ext_sales_price
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: ss_ext_sales_price
             description: Extended sales price
             ai_context:
@@ -77,7 +77,7 @@ semantic_model:
           - name: ss_net_profit
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: ss_net_profit
             description: Net profit for the line item
             ai_context:
@@ -97,7 +97,7 @@ semantic_model:
           - name: c_customer_sk
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: c_customer_sk
             description: Customer surrogate key
             ai_context:
@@ -106,7 +106,7 @@ semantic_model:
           - name: c_first_name
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: c_first_name
             description: Customer first name
             ai_context:
@@ -115,7 +115,7 @@ semantic_model:
           - name: c_last_name
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: c_last_name
             description: Customer last name
             ai_context:
@@ -125,7 +125,7 @@ semantic_model:
           - name: customer_full_name
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: c_first_name || ' ' || c_last_name
             description: Customer full name (computed)
             ai_context:
@@ -144,7 +144,7 @@ semantic_model:
           - name: i_item_sk
             expression:
               dialects:
-                - dialect: ANSI_SQL
+                - dialect: BIGQUERY
                   expression: i_item_sk
             description: Item surrogate key
             ai_context:
@@ -155,8 +155,6 @@ semantic_model:
             expression:
               dialects:
                 - dialect: BIGQUERY
-                  expression: i_brand
-                - dialect: ANSI_SQL
                   expression: i_brand
             description: Brand name
             ai_context:
@@ -188,7 +186,7 @@ semantic_model:
       - name: total_sales
         expression:
           dialects:
-            - dialect: ANSI_SQL
+            - dialect: BIGQUERY
               expression: SUM(store_sales.ss_ext_sales_price)
         description: Total sales revenue
         ai_context:
@@ -198,7 +196,7 @@ semantic_model:
       - name: total_profit
         expression:
           dialects:
-            - dialect: ANSI_SQL
+            - dialect: BIGQUERY
               expression: SUM(store_sales.ss_net_profit)
         description: Total net profit
         ai_context:
@@ -208,7 +206,7 @@ semantic_model:
       - name: customer_lifetime_value
         expression:
           dialects:
-            - dialect: ANSI_SQL
+            - dialect: BIGQUERY
               expression: SUM(store_sales.ss_ext_sales_price) / COUNT(DISTINCT customer.c_customer_sk)
         description: Cross-dataset ratio; not a single MEASURE
         ai_context:
