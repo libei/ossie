@@ -1,4 +1,4 @@
-CREATE OR REPLACE PROPERTY GRAPH enrollments_graph
+CREATE OR REPLACE PROPERTY GRAPH enrollment_graph
   NODE TABLES (
     `campus.public.student` AS student
       KEY(student_id)
@@ -20,7 +20,7 @@ CREATE OR REPLACE PROPERTY GRAPH enrollments_graph
       KEY(s_id, c_id)
       SOURCE KEY (s_id) REFERENCES student (student_id)
       DESTINATION KEY (c_id) REFERENCES course (course_id)
-      DEFAULT LABEL OPTIONS(synonyms=["takes", "registered for"])
+      DEFAULT LABEL OPTIONS(description="A student's enrollment in a course", synonyms=["takes", "registered for"])
       PROPERTIES(
         grade OPTIONS(description="Final grade the student earned", synonyms=["mark", "score"]),
         enrolled_on OPTIONS(description="Date the student enrolled in the course", synonyms=["enrollment date"])

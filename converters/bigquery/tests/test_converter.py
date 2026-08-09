@@ -658,52 +658,61 @@ def test_edge_extension_from_another_vendor_is_ignored():
   assert not any("not valid JSON" in m for m in _warnings_for(ossie))
 
 
-# --- many-to-many (association / junction table) edges ---------------------
+# --- many-to-many / first-class edges --------------------------------------
 #
-# A plain foreign key links each `from` row to at most one `to` row. A
-# many-to-many link (a student takes many courses; a course holds many students)
-# is instead backed by a junction table, which BigQuery models as an edge whose
-# SOURCE and DESTINATION keys both sit on the junction and REFERENCE two nodes.
-# The junction rides in the same Google-owned `custom_extensions` entry as edge
-# properties, under an `association` object.
+# A core-spec `relationship` is sugar for a many-to-one foreign-key edge backed
+# by the `from` table. A many-to-many link (a student takes many courses; a
+# course holds many students) has no foreign key to hang off, so it is backed by
+# its own junction table. BigQuery models that as an EDGE TABLE that is a NODE
+# TABLE plus two endpoints, so an edge is declared here exactly like a dataset:
+# its own `source`, `primary_key`, and `fields`, plus a `source_key`/
+# `destination_key` endpoint. The `edges` list rides in a model-level
+# Google-owned `custom_extensions` entry until the core spec grows an `edges:`.
 
 
-def _assoc_ext(association, fields=None):
-  """A relationship `custom_extensions` block carrying an association (and
-
-  optionally edge-property fields).
-  """
-  payload = {"association": association}
-  if fields is not None:
-    payload["fields"] = fields
+def _edges_ext(edges):
+  """A model-level `custom_extensions` block carrying first-class edges."""
   return {
       "custom_extensions": [
-          {"vendor_name": "GOOGLE", "data": json.dumps(payload)}
+          {"vendor_name": "GOOGLE", "data": json.dumps({"edges": edges})}
       ]
   }
 
 
-# A junction whose own foreign-key columns (`s_id`, `c_id`) are deliberately
-# named differently from the nodes' key columns (`student_id`, `course_id`).
-_ASSOC = {
-    "table": "c.s.enrollment",
-    "source_key": ["s_id"],
-    "destination_key": ["c_id"],
+# A first-class edge backed by its own junction table, whose own key columns
+# (`s_id`, `c_id`) are deliberately named differently from the nodes' keys
+# (`student_id`, `course_id`) to show that the two are distinct.
+_EDGE = {
+    "name": "enrolled_in",
+    "source": "c.s.enrollment",
+    "primary_key": ["s_id", "c_id"],
+    "source_key": {
+        "columns": ["s_id"],
+        "node": "student",
+        "references": ["student_id"],
+    },
+    "destination_key": {
+        "columns": ["c_id"],
+        "node": "course",
+        "references": ["course_id"],
+    },
 }
 
 
-def _mn_model(association=None, fields=None, rel_extra=None):
-  rel = {
-      "name": "enrolled_in",
-      "from": "student",
-      "to": "course",
-      "from_columns": ["student_id"],
-      "to_columns": ["course_id"],
-  }
-  if association is not None:
-    rel.update(_assoc_ext(association, fields))
-  if rel_extra:
-    rel.update(rel_extra)
+def _edge_model(edge=None, extra=None, model_extra=None):
+  """A two-node (student, course) model carrying one first-class edge.
+
+  `edge` defaults to `_EDGE`; `extra` merges into the edge dict; `model_extra`
+  overrides the model-level extension (e.g. to inject a raw `custom_extensions`
+  instead of the generated `edges` one).
+  """
+  if model_extra is not None:
+    kwargs = model_extra
+  else:
+    e = dict(edge if edge is not None else _EDGE)
+    if extra:
+      e.update(extra)
+    kwargs = _edges_ext([e])
   return _model(
       [
           {
@@ -717,119 +726,208 @@ def _mn_model(association=None, fields=None, rel_extra=None):
               "primary_key": ["course_id"],
           },
       ],
-      relationships=[rel],
+      **kwargs,
   )
 
 
-def test_mn_graph_export_matches_golden():
-  out = _convert(load_fixture("mn_ossie.yaml"))
-  assert out == load_fixture("mn_graph.sql")
+def test_enrollment_graph_export_matches_golden():
+  out = _convert(load_fixture("enrollment_ossie.yaml"))
+  assert out == load_fixture("enrollment_graph.sql")
 
 
-def test_mn_graph_export_is_warning_free():
-  assert _warnings_for(load_fixture("mn_ossie.yaml")) == []
+def test_enrollment_graph_export_is_warning_free():
+  assert _warnings_for(load_fixture("enrollment_ossie.yaml")) == []
 
 
-def test_association_edge_is_backed_by_the_junction_table():
-  # The edge table is the junction, not the `from` node's table.
-  out = _convert(_mn_model(_ASSOC))
+def test_first_class_edge_is_backed_by_its_own_source():
+  # The edge table is the junction, not either node's table.
+  out = _convert(_edge_model())
   assert "`c.s.enrollment` AS enrolled_in" in out
   assert "`c.s.student` AS enrolled_in" not in out
 
 
-def test_association_source_and_destination_reference_two_nodes():
-  # SOURCE/DESTINATION keys are the junction's own columns (s_id, c_id); the
+def test_edge_endpoints_reference_two_nodes():
+  # source_key/destination_key columns are the edge's own (s_id, c_id); the
   # REFERENCES targets are the nodes' key columns (student_id, course_id).
-  out = _convert(_mn_model(_ASSOC))
+  out = _convert(_edge_model())
   assert "SOURCE KEY (s_id) REFERENCES student (student_id)" in out
   assert "DESTINATION KEY (c_id) REFERENCES course (course_id)" in out
 
 
-def test_association_edge_key_defaults_to_source_plus_destination():
-  out = _convert(_mn_model(_ASSOC))
+def test_edge_key_defaults_to_source_plus_destination_columns():
+  edge = dict(_EDGE)
+  del edge["primary_key"]
+  out = _convert(_edge_model(edge))
   assert re.search(r"AS enrolled_in\n\s+KEY\(s_id, c_id\)", out)
 
 
-def test_association_edge_key_dedups_shared_columns():
-  # A junction keyed by a single shared column emits it once, not twice.
-  assoc = {
-      "table": "c.s.link",
-      "source_key": ["pair_id"],
-      "destination_key": ["pair_id"],
+def test_edge_key_dedups_shared_columns():
+  # An edge keyed on a single shared column emits it once, not twice.
+  edge = {
+      "name": "link",
+      "source": "c.s.link",
+      "source_key": {
+          "columns": ["pair_id"],
+          "node": "student",
+          "references": ["student_id"],
+      },
+      "destination_key": {
+          "columns": ["pair_id"],
+          "node": "course",
+          "references": ["course_id"],
+      },
   }
-  out = _convert(_mn_model(assoc))
+  out = _convert(_edge_model(edge))
   assert "KEY(pair_id)" in out
   assert "KEY(pair_id, pair_id)" not in out
 
 
-def test_association_edge_key_explicit_override():
-  assoc = dict(_ASSOC, key=["s_id", "c_id", "term"])
-  out = _convert(_mn_model(assoc))
+def test_edge_key_explicit_override():
+  out = _convert(_edge_model(extra={"primary_key": ["s_id", "c_id", "term"]}))
   assert "KEY(s_id, c_id, term)" in out
 
 
-def test_association_edge_properties_render_on_the_junction():
-  out = _convert(_mn_model(_ASSOC, fields=[_field("grade")]))
+def test_edge_references_default_to_node_primary_key():
+  # An endpoint may omit `references`; it defaults to the node's primary_key.
+  edge = dict(_EDGE)
+  edge["source_key"] = {"columns": ["s_id"], "node": "student"}
+  edge["destination_key"] = {"columns": ["c_id"], "node": "course"}
+  out = _convert(_edge_model(edge))
+  assert "SOURCE KEY (s_id) REFERENCES student (student_id)" in out
+  assert "DESTINATION KEY (c_id) REFERENCES course (course_id)" in out
+
+
+def test_edge_composite_keys_preserve_order():
+  edge = {
+      "name": "link",
+      "source": "c.s.link",
+      "source_key": {
+          "columns": ["sa", "sb"],
+          "node": "student",
+          "references": ["stu_a", "stu_b"],
+      },
+      "destination_key": {
+          "columns": ["da", "db"],
+          "node": "course",
+          "references": ["crs_a", "crs_b"],
+      },
+  }
+  out = _convert(_edge_model(edge))
+  assert "SOURCE KEY (sa, sb) REFERENCES student (stu_a, stu_b)" in out
+  assert "DESTINATION KEY (da, db) REFERENCES course (crs_a, crs_b)" in out
+
+
+def test_edge_properties_render_on_the_edge():
+  out = _convert(_edge_model(extra={"fields": [_field("grade")]}))
   assert "AS enrolled_in" in out
   assert re.search(r"^\s+grade\s*$", out, re.MULTILINE)
 
 
-def test_association_composite_keys_preserve_order():
-  assoc = {
-      "table": "c.s.link",
-      "source_key": ["sa", "sb"],
-      "destination_key": ["da", "db"],
+def test_computed_edge_property_uses_expr_as_name():
+  out = _convert(
+      _edge_model(extra={"fields": [_field("total", "price * qty")]})
+  )
+  assert "price * qty AS total" in out
+
+
+def test_invalid_first_class_edge_field_raises():
+  ossie = _edge_model(extra={"fields": [{"name": "bad"}]})
+  with pytest.raises(ConversionError, match="invalid edge property"):
+    exporter.convert_ossie_to_bq_graph(ossie)
+
+
+def test_edge_missing_name_raises():
+  edge = dict(_EDGE)
+  del edge["name"]
+  with pytest.raises(ConversionError, match="missing a 'name'"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+
+
+def test_edge_missing_source_raises():
+  edge = dict(_EDGE)
+  del edge["source"]
+  with pytest.raises(ConversionError, match="'source' is required"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+
+
+def test_edge_endpoint_not_a_mapping_raises():
+  edge = dict(_EDGE)
+  edge["source_key"] = ["s_id"]
+  with pytest.raises(ConversionError, match="'source_key' is required"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+
+
+def test_edge_endpoint_missing_columns_raises():
+  edge = dict(_EDGE)
+  edge["source_key"] = {"node": "student"}
+  with pytest.raises(ConversionError, match=r"source_key\.columns"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+
+
+def test_edge_endpoint_unknown_node_raises():
+  edge = dict(_EDGE)
+  edge["destination_key"] = {"columns": ["c_id"], "node": "ghost"}
+  with pytest.raises(ConversionError, match="unknown dataset"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+
+
+def test_edge_columns_references_arity_mismatch_raises():
+  edge = dict(_EDGE)
+  edge["source_key"] = {
+      "columns": ["s_id"],
+      "node": "student",
+      "references": ["student_id", "extra"],
   }
-  rel_extra = {"from_columns": ["p1", "p2"], "to_columns": ["q1", "q2"]}
-  ossie = _mn_model(assoc, rel_extra=rel_extra)
-  out = _convert(ossie)
-  assert "SOURCE KEY (sa, sb) REFERENCES student (p1, p2)" in out
-  assert "DESTINATION KEY (da, db) REFERENCES course (q1, q2)" in out
+  with pytest.raises(ConversionError, match="must match"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
 
 
-def test_association_missing_table_raises():
-  ossie = _mn_model({"source_key": ["s_id"], "destination_key": ["c_id"]})
-  with pytest.raises(ConversionError, match="association 'table' is required"):
-    exporter.convert_ossie_to_bq_graph(ossie)
-
-
-def test_association_missing_source_key_raises():
-  ossie = _mn_model({"table": "c.s.enrollment", "destination_key": ["c_id"]})
-  with pytest.raises(ConversionError, match="association.source_key"):
-    exporter.convert_ossie_to_bq_graph(ossie)
-
-
-def test_association_non_mapping_raises():
-  rel_extra = {
+def test_edges_must_be_a_list():
+  model_extra = {
       "custom_extensions": [
-          {"vendor_name": "GOOGLE", "data": json.dumps({"association": [1, 2]})}
+          {"vendor_name": "GOOGLE", "data": json.dumps({"edges": {"x": 1}})}
       ]
   }
-  ossie = _mn_model(rel_extra=rel_extra)
-  with pytest.raises(ConversionError, match="'association' must be a mapping"):
-    exporter.convert_ossie_to_bq_graph(ossie)
+  with pytest.raises(ConversionError, match="'edges' must be a list"):
+    exporter.convert_ossie_to_bq_graph(_edge_model(model_extra=model_extra))
 
 
-def test_association_from_other_vendor_is_ignored():
-  # An association owned by another vendor is not read, so the relationship
-  # falls back to a plain foreign-key edge backed by the `from` table.
-  rel_extra = {
+def test_edges_from_other_vendor_are_ignored():
+  # A model-level edges list owned by another vendor is not read.
+  model_extra = {
       "custom_extensions": [{
           "vendor_name": "SNOWFLAKE",
-          "data": json.dumps({"association": _ASSOC}),
+          "data": json.dumps({"edges": [_EDGE]}),
       }]
   }
-  out = _convert(_mn_model(rel_extra=rel_extra))
-  assert "`c.s.student` AS enrolled_in" in out  # direct-FK edge, not junction
+  out = _convert(_edge_model(model_extra=model_extra))
+  assert "EDGE TABLES" not in out
   assert "c.s.enrollment" not in out
 
 
-def test_mn_graph_suppresses_single_root_warning():
-  # A pure many-to-many graph references both nodes from the edge, so the
-  # single-root (GRAPH_EXPAND) heuristic does not apply -- no root warning.
-  assert not any(
-      "root node table" in m for m in _warnings_for(_mn_model(_ASSOC))
+def test_edge_to_keyless_node_is_dropped_with_warning():
+  # An endpoint node with no primary_key cannot be a graph node, so the edge
+  # that references it is dropped with a warning (as a dangling FK edge is).
+  model = _model(
+      [
+          {
+              "name": "student",
+              "source": "c.s.student",
+              "primary_key": ["student_id"],
+          },
+          {"name": "course", "source": "c.s.course"},  # no PK -> skipped
+      ],
+      **_edges_ext([_EDGE]),
   )
+  out = _convert(model)
+  assert "EDGE TABLES" not in out
+  assert any("edge omitted" in m for m in _warnings_for(model))
+
+
+def test_enrollment_graph_suppresses_single_root_warning():
+  # A junction edge is ignored by GRAPH_EXPAND and references both nodes, so the
+  # single-root heuristic does not apply -- no root warning.
+  assert not any("root node table" in m for m in _warnings_for(_edge_model()))
 
 
 # --- root-node validation --------------------------------------------------

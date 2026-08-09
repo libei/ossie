@@ -15,26 +15,28 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# A many-to-many graph: a student can enroll in many courses, and a course can
-# hold many students. A plain foreign key cannot express that -- it would pin
-# each enrollment to one side -- so the link lives in its own junction table,
-# `enrollment`, with one row per (student, course) pair. BigQuery models that
-# junction as an EDGE TABLE whose SOURCE and DESTINATION keys both sit on the
-# junction and REFERENCE two different nodes.
+# A many-to-many graph, expressed with a first-class edge. A student can enroll
+# in many courses and a course can hold many students; a foreign key cannot say
+# that, so the link lives in its own table, `enrollment` (one row per (student,
+# course) pair). In BigQuery an EDGE TABLE is structurally a NODE TABLE plus two
+# endpoints: it has its own backing table, KEY, and PROPERTIES, then a SOURCE KEY
+# and a DESTINATION KEY that each REFERENCE a node. So the edge is modeled here
+# exactly like a dataset -- it has a `source`, a `primary_key`, and `fields` --
+# plus a `source_key`/`destination_key` saying where it connects.
 #
-# The core spec has no slot for a junction table on a relationship yet, so it is
-# declared -- next to the edge properties (grade, enrolled_on) that describe the
-# link itself -- in the same Google-owned `custom_extensions` entry, under an
-# `association` object. The relationship's own `from_columns`/`to_columns` stay
-# the referenced key columns on the two nodes; `association.source_key` and
-# `association.destination_key` are the junction table's own foreign keys, which
-# here are deliberately named differently (`s_id`, `c_id`) to show that the
-# junction's columns and the nodes' keys are distinct.
+# The core spec has no first-class edge slot yet, so the `edges` list rides in a
+# model-level Google-owned `custom_extensions` entry, shaped as a future
+# spec-native `edges:` (a sibling of `datasets:`) would be. Each endpoint reads
+# left to right as its DDL clause: `columns` are the edge's own key columns, and
+# they REFERENCE `node` (`references`). `references` defaults to that node's
+# primary_key and is spelled out here only to be explicit; the junction's own
+# columns (`s_id`, `c_id`) are deliberately named differently from the nodes'
+# keys to show that the two are distinct.
 
 version: "0.2.0.dev0"
 
 semantic_model:
-  - name: enrollments_graph
+  - name: enrollment_graph
     description: Students and the courses they enroll in
     ai_context:
       synonyms:
@@ -89,25 +91,29 @@ semantic_model:
                   expression: title
             description: Course title
 
-    relationships:
-      - name: enrolled_in
-        from: student
-        to: course
-        from_columns: [student_id]
-        to_columns: [course_id]
-        ai_context:
-          synonyms:
-            - takes
-            - registered for
-        custom_extensions:
-          - vendor_name: GOOGLE
-            data: |
+    # The many-to-many edge, modeled like a dataset (its own source, key, and
+    # fields) plus two endpoints. Carried in a model-level Google extension until
+    # the core spec grows a first-class `edges:` list.
+    custom_extensions:
+      - vendor_name: GOOGLE
+        data: |
+          {
+            "edges": [
               {
-                "association": {
-                  "table": "campus.public.enrollment",
-                  "source_key": ["s_id"],
-                  "destination_key": ["c_id"],
-                  "key": ["s_id", "c_id"]
+                "name": "enrolled_in",
+                "source": "campus.public.enrollment",
+                "primary_key": ["s_id", "c_id"],
+                "description": "A student's enrollment in a course",
+                "ai_context": {"synonyms": ["takes", "registered for"]},
+                "source_key": {
+                  "columns": ["s_id"],
+                  "node": "student",
+                  "references": ["student_id"]
+                },
+                "destination_key": {
+                  "columns": ["c_id"],
+                  "node": "course",
+                  "references": ["course_id"]
                 },
                 "fields": [
                   {
@@ -132,3 +138,5 @@ semantic_model:
                   }
                 ]
               }
+            ]
+          }
