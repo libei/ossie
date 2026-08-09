@@ -757,6 +757,72 @@ def test_description_quoting_escapes_specials():
   assert r"has \"quote\" and\ttab" in out
 
 
+# --- synonyms BigQuery would reject as duplicates --------------------------
+#
+# BigQuery treats a label or property name as an implicit synonym of itself and
+# rejects a CREATE PROPERTY GRAPH whose synonym list repeats that name or lists
+# the same synonym twice (both case-insensitively). The converter drops those so
+# the emitted DDL is always accepted; these cases are validated against live
+# BigQuery.
+
+
+def test_label_synonym_equal_to_label_is_dropped():
+  ossie = _model([{
+      "name": "orders",
+      "source": "c.s.orders",
+      "primary_key": ["k"],
+      "ai_context": {"synonyms": ["orders", "sales orders"]},
+  }])
+  out = _convert(ossie)
+  assert 'DEFAULT LABEL OPTIONS(synonyms=["sales orders"])' in out
+  assert any("duplicates the name it labels" in m for m in _warnings_for(ossie))
+
+
+def test_label_synonym_matching_label_case_insensitively_is_dropped():
+  ossie = _model([{
+      "name": "orders",
+      "source": "c.s.orders",
+      "primary_key": ["k"],
+      "ai_context": {"synonyms": ["ORDERS"]},
+  }])
+  # The only synonym collided with the label, so no synonyms option remains.
+  assert "synonyms=" not in _convert(ossie)
+  assert any("duplicates the name it labels" in m for m in _warnings_for(ossie))
+
+
+def test_duplicate_synonyms_are_deduped_case_insensitively():
+  ossie = _model([{
+      "name": "f",
+      "source": "c.s.f",
+      "primary_key": ["k"],
+      "ai_context": {"synonyms": ["a", "A", "b"]},
+  }])
+  out = _convert(ossie)
+  assert 'DEFAULT LABEL OPTIONS(synonyms=["a", "b"])' in out
+  assert any("duplicate synonym" in m for m in _warnings_for(ossie))
+
+
+def test_property_synonym_equal_to_property_name_is_dropped():
+  ossie = _model([{
+      "name": "f",
+      "source": "c.s.f",
+      "primary_key": ["k"],
+      "fields": [_field("amount", ai_context={"synonyms": ["amount", "amt"]})],
+  }])
+  assert 'amount OPTIONS(synonyms=["amt"])' in _convert(ossie)
+
+
+def test_graph_synonym_equal_to_graph_name_is_kept():
+  # A graph-level synonym equal to the graph name is allowed by BigQuery (only
+  # labels and properties have an implicit self-synonym), so it is not dropped.
+  ossie = _model(
+      [{"name": "f", "source": "c.s.f", "primary_key": ["k"]}],
+      name="g",
+      ai_context={"synonyms": ["g", "graph alias"]},
+  )
+  assert 'OPTIONS(synonyms=["g", "graph alias"])' in _convert(ossie)
+
+
 # --- consumption shape (GRAPH_EXPAND + AGG) --------------------------------
 
 

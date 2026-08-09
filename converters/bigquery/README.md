@@ -540,6 +540,7 @@ element it concerns in brackets, e.g. `[customer_lifetime_value] metric spans �
 | `no BigQuery-convertible SQL expression` | only a dialect sqlglot can't read (a non-SQL one), or no expression | add a SQL dialect expression (`BIGQUERY` or `ANSI_SQL` is used verbatim; other SQL dialects are transpiled) |
 | `not a plain project.dataset.table identifier` | `source` isn't a base table | point `source` at a table, not a subquery |
 | `custom extension … is not valid JSON` | a relationship's edge-property extension payload isn't JSON | fix the `custom_extensions[].data` JSON, or remove it |
+| `synonym … duplicates the name it labels` / `duplicate synonym … dropped` | a synonym repeats the label/property name, or the list repeats a synonym (BigQuery treats a name as an implicit synonym of itself and rejects either, case-insensitively) | nothing required — the duplicate is dropped so the DDL stays valid; remove it upstream to silence the warning |
 | `graph has no root node table` / `multiple root node tables` | not exactly one root | adjust relationships so one node has no incoming edge |
 | `multiple semantic models found` | more than one model in the file | split them, or accept only the first being used |
 

@@ -243,7 +243,8 @@ def _render_property_graph(model):
   if edge_tables:
     blocks.append(_render_tables_clause("EDGE TABLES", edge_tables))
   graph_opts = _render_options_clause(
-      _element_description(model), _element_synonyms(model)
+      _element_description(model),
+      _clean_synonyms(_element_synonyms(model), None, model.name),
   )
   if graph_opts:
     blocks.append(_indented_line(1, graph_opts))
@@ -302,7 +303,8 @@ def _register_metric_measure(metric, datasets, measures_by_dataset):
 
   measure = f"MEASURE({body}) AS {metric.name}"
   opts = _render_options_clause(
-      _element_description(metric), _element_synonyms(metric)
+      _element_description(metric),
+      _clean_synonyms(_element_synonyms(metric), metric.name, metric.name),
   )
   measures_by_dataset.setdefault(dataset, []).append({
       "ddl": f"{measure} {opts}" if opts else measure,
@@ -375,7 +377,8 @@ def _render_property_from_field(dataset, field):
   local = _strip_dataset_qualifier(expr, dataset).strip()
   prop = field.name if local == field.name else f"{local} AS {field.name}"
   opts = _render_options_clause(
-      _element_description(field), _element_synonyms(field)
+      _element_description(field),
+      _clean_synonyms(_element_synonyms(field), field.name, field.name),
   )
   return f"{prop} {opts}" if opts else prop
 
@@ -749,7 +752,12 @@ def _render_default_label_clause(element):
   relationship being rendered.
   """
   opts = _render_options_clause(
-      _element_description(element), _element_synonyms(element)
+      _element_description(element),
+      _clean_synonyms(
+          _element_synonyms(element),
+          getattr(element, "name", None),
+          getattr(element, "name", None),
+      ),
   )
   return f"DEFAULT LABEL {opts}" if opts else None
 
@@ -781,3 +789,30 @@ def _element_synonyms(element):
   if isinstance(ai, OSIAIContextObject):
     return list(ai.synonyms or [])
   return []
+
+
+def _clean_synonyms(synonyms, own_name, scope):
+  """Drop synonyms BigQuery would reject as duplicates, warning on each.
+
+  BigQuery treats a graph label or property name as an implicit synonym of
+  itself, and rejects a `CREATE PROPERTY GRAPH` whose synonym list repeats that
+  name or lists the same synonym twice -- both compared case-insensitively.
+  Keep the first spelling of each distinct synonym and drop the rest so the
+  emitted DDL is always accepted. `own_name` is the label/property name the
+  synonyms hang off (its implicit synonym), or None where there is none (the
+  graph itself); `scope` tags any warning.
+  """
+  own = own_name.casefold() if isinstance(own_name, str) else None
+  kept = []
+  seen = set()
+  for syn in synonyms:
+    key = syn.casefold()
+    if key == own:
+      _warn(scope, f"synonym {syn!r} duplicates the name it labels; dropped")
+      continue
+    if key in seen:
+      _warn(scope, f"duplicate synonym {syn!r} dropped")
+      continue
+    seen.add(key)
+    kept.append(syn)
+  return kept

@@ -2,7 +2,7 @@ CREATE OR REPLACE PROPERTY GRAPH orders_graph
   NODE TABLES (
     `shop.public.orders` AS orders
       KEY(order_id)
-      DEFAULT LABEL OPTIONS(description="An order placed by a customer", synonyms=["orders", "sales orders"])
+      DEFAULT LABEL OPTIONS(description="An order placed by a customer", synonyms=["sales orders", "purchase orders"])
       PROPERTIES(
         order_id OPTIONS(description="Unique identifier for the order", synonyms=["order number"]),
         customer_id OPTIONS(description="The customer who placed the order", synonyms=["buyer id"])

@@ -47,8 +47,8 @@ semantic_model:
         description: An order placed by a customer
         ai_context:
           synonyms:
-            - orders
             - sales orders
+            - purchase orders
         fields:
           - name: order_id
             expression:
