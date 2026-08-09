@@ -15,12 +15,18 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# A tiny orders graph whose edge carries its own properties. BigQuery graph
-# edge tables can hold PROPERTIES just like node tables, but the core spec has
-# no field slot on a relationship yet, so the edge properties are declared in a
-# `custom_extensions` entry whose JSON payload mirrors the core `fields` shape
-# verbatim -- exactly the form a spec-native `relationships[].fields` would
-# take. The edge properties (order_date, order_total) are columns of the `from`
+# A tiny orders graph whose edge carries its own properties. Every object -- the
+# model, the two nodes, their fields, the edge, and each edge property -- carries
+# a description and a structured ai_context (synonyms), highlighting how Ossie's
+# semantic metadata maps onto BigQuery's native OPTIONS(description=...,
+# synonyms=[...]) everywhere, edge properties included.
+#
+# BigQuery edge tables can hold PROPERTIES just like node tables, but the core
+# spec has no field slot on a relationship yet, so the edge properties are
+# declared in a `custom_extensions` entry whose JSON payload mirrors the core
+# `fields` shape verbatim -- exactly the form a spec-native
+# `relationships[].fields` would take, per-field description and ai_context and
+# all. The edge properties (order_date, order_total) are columns of the `from`
 # base table that backs the edge, and are deliberately not repeated as node
 # fields on `orders`, so the emitted node and edge PROPERTIES stay distinct.
 
@@ -29,39 +35,67 @@ version: "0.2.0.dev0"
 semantic_model:
   - name: orders_graph
     description: Orders placed by customers
+    ai_context:
+      synonyms:
+        - order graph
+        - purchases
 
     datasets:
       - name: orders
         source: shop.public.orders
         primary_key: [order_id]
         description: Order fact table
+        ai_context:
+          synonyms:
+            - orders
+            - sales orders
         fields:
           - name: order_id
             expression:
               dialects:
                 - dialect: ANSI_SQL
                   expression: order_id
+            description: Order surrogate key
+            ai_context:
+              synonyms:
+                - order number
           - name: customer_id
             expression:
               dialects:
                 - dialect: ANSI_SQL
                   expression: customer_id
+            description: Foreign key to customer
+            ai_context:
+              synonyms:
+                - buyer id
 
       - name: customer
         source: shop.public.customer
         primary_key: [customer_id]
         description: Customer dimension
+        ai_context:
+          synonyms:
+            - customers
+            - buyers
         fields:
           - name: customer_id
             expression:
               dialects:
                 - dialect: ANSI_SQL
                   expression: customer_id
+            description: Customer surrogate key
+            ai_context:
+              synonyms:
+                - customer number
           - name: customer_name
             expression:
               dialects:
                 - dialect: ANSI_SQL
                   expression: customer_name
+            description: Customer full name
+            ai_context:
+              synonyms:
+                - name
 
     relationships:
       - name: placed_by
@@ -72,6 +106,7 @@ semantic_model:
         ai_context:
           synonyms:
             - ordered by
+            - purchased by
         custom_extensions:
           - vendor_name: COMMON
             data: |
@@ -84,7 +119,8 @@ semantic_model:
                         {"dialect": "ANSI_SQL", "expression": "order_date"}
                       ]
                     },
-                    "description": "When the order was placed"
+                    "description": "When the order was placed",
+                    "ai_context": {"synonyms": ["purchase date", "ordered on"]}
                   },
                   {
                     "name": "order_total",
@@ -92,7 +128,9 @@ semantic_model:
                       "dialects": [
                         {"dialect": "ANSI_SQL", "expression": "order_total"}
                       ]
-                    }
+                    },
+                    "description": "Total amount of the order",
+                    "ai_context": {"synonyms": ["order amount", "basket value"]}
                   }
                 ]
               }
