@@ -658,6 +658,180 @@ def test_edge_extension_from_another_vendor_is_ignored():
   assert not any("not valid JSON" in m for m in _warnings_for(ossie))
 
 
+# --- many-to-many (association / junction table) edges ---------------------
+#
+# A plain foreign key links each `from` row to at most one `to` row. A
+# many-to-many link (a student takes many courses; a course holds many students)
+# is instead backed by a junction table, which BigQuery models as an edge whose
+# SOURCE and DESTINATION keys both sit on the junction and REFERENCE two nodes.
+# The junction rides in the same Google-owned `custom_extensions` entry as edge
+# properties, under an `association` object.
+
+
+def _assoc_ext(association, fields=None):
+  """A relationship `custom_extensions` block carrying an association (and
+
+  optionally edge-property fields).
+  """
+  payload = {"association": association}
+  if fields is not None:
+    payload["fields"] = fields
+  return {
+      "custom_extensions": [
+          {"vendor_name": "GOOGLE", "data": json.dumps(payload)}
+      ]
+  }
+
+
+# A junction whose own foreign-key columns (`s_id`, `c_id`) are deliberately
+# named differently from the nodes' key columns (`student_id`, `course_id`).
+_ASSOC = {
+    "table": "c.s.enrollment",
+    "source_key": ["s_id"],
+    "destination_key": ["c_id"],
+}
+
+
+def _mn_model(association=None, fields=None, rel_extra=None):
+  rel = {
+      "name": "enrolled_in",
+      "from": "student",
+      "to": "course",
+      "from_columns": ["student_id"],
+      "to_columns": ["course_id"],
+  }
+  if association is not None:
+    rel.update(_assoc_ext(association, fields))
+  if rel_extra:
+    rel.update(rel_extra)
+  return _model(
+      [
+          {
+              "name": "student",
+              "source": "c.s.student",
+              "primary_key": ["student_id"],
+          },
+          {
+              "name": "course",
+              "source": "c.s.course",
+              "primary_key": ["course_id"],
+          },
+      ],
+      relationships=[rel],
+  )
+
+
+def test_mn_graph_export_matches_golden():
+  out = _convert(load_fixture("mn_ossie.yaml"))
+  assert out == load_fixture("mn_graph.sql")
+
+
+def test_mn_graph_export_is_warning_free():
+  assert _warnings_for(load_fixture("mn_ossie.yaml")) == []
+
+
+def test_association_edge_is_backed_by_the_junction_table():
+  # The edge table is the junction, not the `from` node's table.
+  out = _convert(_mn_model(_ASSOC))
+  assert "`c.s.enrollment` AS enrolled_in" in out
+  assert "`c.s.student` AS enrolled_in" not in out
+
+
+def test_association_source_and_destination_reference_two_nodes():
+  # SOURCE/DESTINATION keys are the junction's own columns (s_id, c_id); the
+  # REFERENCES targets are the nodes' key columns (student_id, course_id).
+  out = _convert(_mn_model(_ASSOC))
+  assert "SOURCE KEY (s_id) REFERENCES student (student_id)" in out
+  assert "DESTINATION KEY (c_id) REFERENCES course (course_id)" in out
+
+
+def test_association_edge_key_defaults_to_source_plus_destination():
+  out = _convert(_mn_model(_ASSOC))
+  assert re.search(r"AS enrolled_in\n\s+KEY\(s_id, c_id\)", out)
+
+
+def test_association_edge_key_dedups_shared_columns():
+  # A junction keyed by a single shared column emits it once, not twice.
+  assoc = {
+      "table": "c.s.link",
+      "source_key": ["pair_id"],
+      "destination_key": ["pair_id"],
+  }
+  out = _convert(_mn_model(assoc))
+  assert "KEY(pair_id)" in out
+  assert "KEY(pair_id, pair_id)" not in out
+
+
+def test_association_edge_key_explicit_override():
+  assoc = dict(_ASSOC, key=["s_id", "c_id", "term"])
+  out = _convert(_mn_model(assoc))
+  assert "KEY(s_id, c_id, term)" in out
+
+
+def test_association_edge_properties_render_on_the_junction():
+  out = _convert(_mn_model(_ASSOC, fields=[_field("grade")]))
+  assert "AS enrolled_in" in out
+  assert re.search(r"^\s+grade\s*$", out, re.MULTILINE)
+
+
+def test_association_composite_keys_preserve_order():
+  assoc = {
+      "table": "c.s.link",
+      "source_key": ["sa", "sb"],
+      "destination_key": ["da", "db"],
+  }
+  rel_extra = {"from_columns": ["p1", "p2"], "to_columns": ["q1", "q2"]}
+  ossie = _mn_model(assoc, rel_extra=rel_extra)
+  out = _convert(ossie)
+  assert "SOURCE KEY (sa, sb) REFERENCES student (p1, p2)" in out
+  assert "DESTINATION KEY (da, db) REFERENCES course (q1, q2)" in out
+
+
+def test_association_missing_table_raises():
+  ossie = _mn_model({"source_key": ["s_id"], "destination_key": ["c_id"]})
+  with pytest.raises(ConversionError, match="association 'table' is required"):
+    exporter.convert_ossie_to_bq_graph(ossie)
+
+
+def test_association_missing_source_key_raises():
+  ossie = _mn_model({"table": "c.s.enrollment", "destination_key": ["c_id"]})
+  with pytest.raises(ConversionError, match="association.source_key"):
+    exporter.convert_ossie_to_bq_graph(ossie)
+
+
+def test_association_non_mapping_raises():
+  rel_extra = {
+      "custom_extensions": [
+          {"vendor_name": "GOOGLE", "data": json.dumps({"association": [1, 2]})}
+      ]
+  }
+  ossie = _mn_model(rel_extra=rel_extra)
+  with pytest.raises(ConversionError, match="'association' must be a mapping"):
+    exporter.convert_ossie_to_bq_graph(ossie)
+
+
+def test_association_from_other_vendor_is_ignored():
+  # An association owned by another vendor is not read, so the relationship
+  # falls back to a plain foreign-key edge backed by the `from` table.
+  rel_extra = {
+      "custom_extensions": [{
+          "vendor_name": "SNOWFLAKE",
+          "data": json.dumps({"association": _ASSOC}),
+      }]
+  }
+  out = _convert(_mn_model(rel_extra=rel_extra))
+  assert "`c.s.student` AS enrolled_in" in out  # direct-FK edge, not junction
+  assert "c.s.enrollment" not in out
+
+
+def test_mn_graph_suppresses_single_root_warning():
+  # A pure many-to-many graph references both nodes from the edge, so the
+  # single-root (GRAPH_EXPAND) heuristic does not apply -- no root warning.
+  assert not any(
+      "root node table" in m for m in _warnings_for(_mn_model(_ASSOC))
+  )
+
+
 # --- root-node validation --------------------------------------------------
 
 

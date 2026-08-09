@@ -215,7 +215,8 @@ def _render_property_graph(model):
   ]
 
   edge_tables = []
-  kept_edges = []
+  fk_edges = []
+  has_many_to_many = False
   for rel in model.relationships or []:
     frm, to = rel.from_dataset, rel.to
     if frm not in datasets or to not in datasets:
@@ -231,10 +232,20 @@ def _render_property_graph(model):
           " edge omitted",
       )
       continue
-    edge_tables.append(_render_edge_table(datasets[frm], rel))
-    kept_edges.append((frm, to))
+    assoc = _edge_association(rel)
+    edge_tables.append(_render_edge_table(datasets[frm], rel, assoc))
+    if assoc is not None:
+      has_many_to_many = True
+    else:
+      fk_edges.append((frm, to))
 
-  _warn_unless_single_root(node_names, kept_edges)
+  # The single-root check is a GRAPH_EXPAND concern: that flattening walks a
+  # foreign-key hierarchy and needs one root. A many-to-many edge is ignored by
+  # GRAPH_EXPAND (it is neither many-to-one nor one-to-one) and references both
+  # endpoints, so root-ness no longer maps to a real requirement -- skip the
+  # check rather than emit a misleading warning for a valid many-to-many graph.
+  if not has_many_to_many:
+    _warn_unless_single_root(node_names, fk_edges)
 
   blocks = [
       f"CREATE OR REPLACE PROPERTY GRAPH {_qualify_graph_name(model.name)}",
@@ -383,48 +394,70 @@ def _render_property_from_field(dataset, field):
   return f"{prop} {opts}" if opts else prop
 
 
-def _render_edge_table(from_ds, rel):
+def _render_edge_table(from_ds, rel, assoc):
   """Render one relationship as an EDGE TABLE entry.
 
-  The edge is backed by the `from` (many) dataset's base table, which holds the
-  foreign-key columns. Its SOURCE KEY references the `from` node's primary key
-  and its DESTINATION KEY references the `to` node's join columns. Any edge
-  properties declared on the relationship (see `_edge_property_fields`) are
-  rendered as a PROPERTIES clause, exactly as a node's fields are.
+  Two shapes, chosen by whether the relationship declares an `association` (see
+  `_edge_association`):
+
+  * **Direct foreign key** (`assoc is None`) -- backed by the `from` (many)
+    dataset's base table, which holds the FK columns. It is its own source node,
+    so its primary key is both the edge KEY and the SOURCE KEY, and its
+    DESTINATION KEY is `from_columns` referencing the `to` node.
+  * **Many-to-many** (`assoc` given) -- backed by a separate junction table. The
+    SOURCE and DESTINATION keys are the junction's own foreign-key columns,
+    referencing the `from`/`to` nodes' key columns
+    (`from_columns`/`to_columns`).
+
+  Any edge properties declared on the relationship are rendered as a PROPERTIES
+  clause, exactly as a node's fields are.
   """
   from_cols = _require_columns(rel.from_columns, rel.name, "from_columns")
   to_cols = _require_columns(rel.to_columns, rel.name, "to_columns")
 
-  backing = _qualify_table_name(from_ds.source, from_ds.name)
-  # Direct foreign-key edge: backed by the `from` (many) dataset's base table,
-  # which holds the FK columns. It is its own source node; its primary key is
-  # both the edge key and the SOURCE KEY.
-  source_key = from_ds.primary_key
+  if assoc is not None:
+    # Many-to-many: the junction table backs the edge and holds both foreign
+    # keys; each references its endpoint node's key columns.
+    backing = _qualify_table_name(assoc["table"], rel.name)
+    edge_key = assoc["key"]
+    source_key, source_ref = assoc["source_key"], from_cols
+    dest_key, dest_ref = assoc["destination_key"], to_cols
+    # Junction columns carry no node qualifier to strip; pass the edge name,
+    # which will not match a bare column.
+    strip_context = rel.name
+  else:
+    # Direct FK: the `from` table is its own source node, so its primary key is
+    # both the edge key and the SOURCE KEY, referencing itself.
+    backing = _qualify_table_name(from_ds.source, from_ds.name)
+    edge_key = from_ds.primary_key
+    source_key, source_ref = from_ds.primary_key, from_ds.primary_key
+    dest_key, dest_ref = from_cols, to_cols
+    strip_context = from_ds.name
 
   lines = [
       _indented_line(2, f"{backing} AS {rel.name}"),
-      _indented_line(3, f"KEY({', '.join(source_key)})"),
+      _indented_line(3, f"KEY({', '.join(edge_key)})"),
       _indented_line(
           3,
           f"SOURCE KEY ({', '.join(source_key)}) REFERENCES"
-          f" {rel.from_dataset} ({', '.join(source_key)})",
+          f" {rel.from_dataset} ({', '.join(source_ref)})",
       ),
       _indented_line(
           3,
-          f"DESTINATION KEY ({', '.join(from_cols)}) REFERENCES"
-          f" {rel.to} ({', '.join(to_cols)})",
+          f"DESTINATION KEY ({', '.join(dest_key)}) REFERENCES"
+          f" {rel.to} ({', '.join(dest_ref)})",
       ),
   ]
   label = _render_default_label_clause(rel)
   if label:
     lines.append(_indented_line(3, label))
 
-  # Edge properties are columns of the same `from` base table that backs the
-  # edge, so they render through the same field path as node properties (and
-  # strip the `from` dataset's qualifier).
+  # Edge properties are columns of the base table that backs the edge (the
+  # `from` table for a direct FK, the junction for a many-to-many), so they
+  # render through the same field path as node properties.
   properties = []
   for field in _edge_property_fields(rel):
-    rendered = _render_property_from_field(from_ds.name, field)
+    rendered = _render_property_from_field(strip_context, field)
     if rendered is not None:
       properties.append(rendered)
   if properties:
@@ -446,6 +479,12 @@ _EDGE_FIELDS_VENDOR = "GOOGLE"
 # take, so promoting it into the core spec later needs no change to already-
 # authored models.
 _EDGE_FIELDS_KEY = "fields"
+
+# Key, inside that same extension's JSON payload, of the `association` object
+# that turns a relationship into a many-to-many edge backed by a junction table
+# (see `_edge_association`). Like edge properties, a junction has no home in the
+# core spec yet, so it rides in the Google-owned extension.
+_EDGE_ASSOCIATION_KEY = "association"
 
 
 def _edge_property_fields(rel):
@@ -482,6 +521,107 @@ def _edge_property_fields(rel):
             f"relationship '{rel.name}': invalid edge property:\n{e}"
         ) from e
   return fields
+
+
+def _edge_association(rel):
+  """Return a relationship's many-to-many association spec, or None.
+
+  A plain foreign-key relationship is backed by the `from` (many-side) table:
+  one edge row per `from` row, so each `from` row links to at most one `to` row
+  (many-to-one). A *many-to-many* relationship is instead backed by a separate
+  junction/link table that holds a foreign key to each endpoint -- so a student
+  can take many courses and a course can hold many students. BigQuery models it
+  as an edge whose SOURCE and DESTINATION keys both live on that junction table
+  and REFERENCE two different nodes.
+
+  A junction has no home in the core spec yet, so it rides in the same
+  Google-owned custom-extension entry as edge properties (see
+  `_edge_property_fields`), under an `association` key:
+
+      {"association": {"table": "<project.dataset.junction>",
+                       "source_key": [<junction cols -> from node>],
+                       "destination_key": [<junction cols -> to node>],
+                       "key": [<edge key; optional>]}}
+
+  The relationship's own `from_columns`/`to_columns` stay the *referenced* key
+  columns on the `from`/`to` nodes (the REFERENCES targets); `source_key` and
+  `destination_key` are the junction table's own foreign-key columns. Returns
+  the validated association dict, or None when the relationship declares none.
+  Raises ConversionError on a malformed association. Extensions owned by other
+  vendors are ignored.
+  """
+  for ext in rel.custom_extensions or []:
+    if ext.vendor_name != _EDGE_FIELDS_VENDOR:
+      continue
+    try:
+      payload = json.loads(ext.data)
+    except (json.JSONDecodeError, TypeError):
+      # A non-JSON payload is already reported by `_edge_property_fields`.
+      continue
+    if not isinstance(payload, dict):
+      continue
+    assoc = payload.get(_EDGE_ASSOCIATION_KEY)
+    if assoc is None:
+      continue
+    if not isinstance(assoc, dict):
+      raise ConversionError(
+          f"relationship '{rel.name}': 'association' must be a mapping"
+      )
+    table = assoc.get("table")
+    if not (isinstance(table, str) and table.strip()):
+      raise ConversionError(
+          f"relationship '{rel.name}': association 'table' is required and"
+          " must be a project.dataset.table string"
+      )
+    source_key = _require_str_list(
+        assoc.get("source_key"), rel.name, "association.source_key"
+    )
+    destination_key = _require_str_list(
+        assoc.get("destination_key"), rel.name, "association.destination_key"
+    )
+    # The edge KEY defaults to the junction's own foreign keys (the composite
+    # that uniquely identifies a link row); a model may override it explicitly.
+    key = assoc.get("key")
+    if key is None:
+      key = _dedup(source_key + destination_key)
+    else:
+      key = _require_str_list(key, rel.name, "association.key")
+    return {
+        "table": table.strip(),
+        "source_key": source_key,
+        "destination_key": destination_key,
+        "key": key,
+    }
+  return None
+
+
+def _dedup(items):
+  """Return `items` with duplicates removed, keeping first-seen order."""
+  seen = set()
+  out = []
+  for item in items:
+    if item not in seen:
+      seen.add(item)
+      out.append(item)
+  return out
+
+
+def _require_str_list(value, rel_name, field_name):
+  """Return `value` if it is a non-empty list of non-empty strings, else raise.
+
+  Used for the raw JSON columns in an `association` block, which -- unlike the
+  core-spec `from_columns`/`to_columns` -- pydantic has not already validated.
+  """
+  if not (
+      isinstance(value, list)
+      and value
+      and all(isinstance(v, str) and v.strip() for v in value)
+  ):
+    raise ConversionError(
+        f"relationship '{rel_name}': '{field_name}' must be a non-empty list of"
+        " column names"
+    )
+  return value
 
 
 def _require_columns(cols, rel_name, field_name):

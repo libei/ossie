@@ -290,9 +290,9 @@ KEY` is `from_columns`, referencing the `to` dataset's `to_columns`.
 Composite join columns keep their order and are matched positionally:
 `from_columns: [a, b]` with `to_columns: [x, y]` pairs `a→x`, `b→y`.
 
-**Many-to-many** needs no special handling. Model the junction as an ordinary
-dataset with two relationships (junction→A and junction→B); it emits as a node
-with two edges — BigQuery's recommended "promote the junction to a node" shape.
+A plain foreign-key edge is **many-to-one**: each `from` row links to at most one
+`to` row. For a **many-to-many** link, back the edge with a junction table — see
+[Many-to-many edges](#many-to-many-edges).
 
 ### Edge properties
 
@@ -345,6 +345,80 @@ Edge fields render through the same path as node fields — bare column or
 is validated with the same `OSIField` model, so a malformed edge field is
 reported like any other. A relationship with no such extension emits no
 `PROPERTIES` clause; a non-JSON payload is ignored with a warning.
+
+### Many-to-many edges
+
+A plain foreign key links each `from` row to at most one `to` row. A
+**many-to-many** link — a student takes many courses, and a course holds many
+students — cannot be a plain FK; it lives in its own **junction table** with one
+row per pair. BigQuery models that junction as an edge whose `SOURCE KEY` and
+`DESTINATION KEY` both sit on the junction and `REFERENCES` two different nodes.
+
+The core spec has no slot for a junction table on a relationship yet, so it is
+declared in the same `GOOGLE`-owned `custom_extensions` entry that carries edge
+properties, under an `association` object. The relationship's own
+`from_columns`/`to_columns` stay the **referenced key columns on the two nodes**
+(the `REFERENCES` targets); `association.source_key`/`destination_key` are the
+**junction table's own foreign keys**:
+
+```yaml
+- name: enrolled_in
+  from: student
+  to: course
+  from_columns: [student_id]   # referenced key on the student node
+  to_columns: [course_id]      # referenced key on the course node
+  custom_extensions:
+    - vendor_name: GOOGLE
+      data: |
+        {
+          "association": {
+            "table": "campus.public.enrollment",
+            "source_key": ["s_id"],
+            "destination_key": ["c_id"],
+            "key": ["s_id", "c_id"]
+          },
+          "fields": [
+            {"name": "grade",
+             "expression": {"dialects": [{"dialect": "BIGQUERY", "expression": "grade"}]}}
+          ]
+        }
+```
+
+```sql
+    `campus.public.enrollment` AS enrolled_in
+      KEY(s_id, c_id)
+      SOURCE KEY (s_id) REFERENCES student (student_id)
+      DESTINATION KEY (c_id) REFERENCES course (course_id)
+      PROPERTIES(
+        grade
+      )
+```
+
+- `association.table` is the junction that backs the edge (a
+  `project.dataset.table`; the converter references it, it does not create it).
+- `association.key` is optional; it defaults to `source_key` + `destination_key`
+  with duplicates removed (the junction's composite key).
+- `association.fields` are edge properties, exactly as for a foreign-key edge —
+  columns of the **junction** table that describe the link (a grade, an
+  enrolment date).
+- A malformed `association` (missing `table`, `source_key`, or
+  `destination_key`) raises a `ConversionError`.
+
+**Consume a many-to-many edge with `MATCH`, not `GRAPH_EXPAND`.** `GRAPH_EXPAND`
+flattens a foreign-key hierarchy and only walks many-to-one / one-to-one edges;
+it **ignores** a many-to-many edge (it is neither). So a graph's measures still
+roll up over its FK edges via `GRAPH_EXPAND` + `AGG`, while the many-to-many link
+is traversed with graph pattern matching:
+
+```sql
+GRAPH enrollments_graph
+MATCH (s:student)-[e:enrolled_in]->(c:course)
+RETURN s.student_name, c.title, e.grade;
+```
+
+Because `GRAPH_EXPAND` does not see it, the converter does not place measures on
+a many-to-many edge, and its single-root check (a `GRAPH_EXPAND` concern) does
+not apply to a graph whose edges are many-to-many.
 
 ### Metric → measure
 
@@ -516,9 +590,11 @@ These are hard requirements — violating one raises a `ConversionError`:
   subquery. A non-identifier source is warned about.
 - **Single-table measures only.** Cross-dataset or dataset-less metrics are
   skipped with a warning (see [Metrics and measures](#metrics-and-measures)).
-- **Exactly one root.** BigQuery requires exactly one root node table — one whose
-  `KEY` is referenced by no edge. The converter warns (but still emits) if the
-  graph has zero or several roots.
+- **Exactly one root.** For a foreign-key hierarchy, BigQuery's `GRAPH_EXPAND`
+  needs exactly one root node table — one whose `KEY` is referenced by no edge.
+  The converter warns (but still emits) if such a graph has zero or several
+  roots. The check is skipped for a graph with many-to-many edges, which
+  `GRAPH_EXPAND` does not walk (see [Many-to-many edges](#many-to-many-edges)).
 - **Dialect.** A `BIGQUERY` or `ANSI_SQL` expression is used verbatim; any other
   SQL dialect is transpiled to BigQuery with sqlglot. The transpilable set is
   whatever sqlglot recognizes, so a SQL dialect added to the core spec is picked
@@ -551,9 +627,11 @@ uv sync
 uv run pytest
 ```
 
-The test suite includes two golden-file exports
-(`tests/fixtures/tpcds_ossie.yaml` → `tests/fixtures/tpcds_graph.sql`, and
-`tests/fixtures/orders_ossie.yaml` → `tests/fixtures/orders_graph.sql` for edge
-properties) plus unit tests
-for measure placement, edge keys and edge properties, root validation, dialect
-selection and transpilation, and OPTIONS (description + synonyms) emission.
+The test suite includes three golden-file exports —
+`tests/fixtures/tpcds_ossie.yaml` → `tests/fixtures/tpcds_graph.sql`,
+`tests/fixtures/orders_ossie.yaml` → `tests/fixtures/orders_graph.sql` (edge
+properties), and `tests/fixtures/mn_ossie.yaml` → `tests/fixtures/mn_graph.sql`
+(a many-to-many junction edge) — plus unit tests for measure placement, edge
+keys and edge properties, many-to-many association edges, root validation,
+dialect selection and transpilation, and OPTIONS (description + synonyms)
+emission.
