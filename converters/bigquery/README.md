@@ -217,7 +217,10 @@ entry point but currently raises `ConversionError` (not yet implemented).
 
 Each rule below shows the Ossie input and the emitted DDL, adapted from the
 [`examples/tpcds_semantic_model.yaml`](../../examples/tpcds_semantic_model.yaml)
-model that ships with Ossie (some fields trimmed for brevity).
+model that ships with Ossie (some fields trimmed for brevity). Each SQL block is
+an **excerpt** of the single `CREATE OR REPLACE PROPERTY GRAPH` statement, shown
+with the exact indentation the converter emits — node and edge entries are nested
+two spaces inside `NODE TABLES (…)` / `EDGE TABLES (…)`.
 
 ### Dataset → node table
 
@@ -244,13 +247,13 @@ becomes the `KEY`. `fields` become properties, and `description` +
 ```
 
 ```sql
-`tpcds.public.customer` AS customer
-  KEY(c_customer_sk)
-  OPTIONS(description="Customer dimension with demographic information\n\nSynonyms: customers, shoppers, buyers")
-  PROPERTIES(
-    c_customer_sk,
-    c_first_name || ' ' || c_last_name AS customer_full_name OPTIONS(description="Customer full name (computed field)")
-  )
+  `tpcds.public.customer` AS customer
+    KEY(c_customer_sk)
+    OPTIONS(description="Customer dimension with demographic information\n\nSynonyms: customers, shoppers, buyers")
+    PROPERTIES(
+      c_customer_sk,
+      c_first_name || ' ' || c_last_name AS customer_full_name OPTIONS(description="Customer full name (computed field)")
+    )
 ```
 
 - A field whose expression is just its own column name emits as a **bare
@@ -276,10 +279,10 @@ KEY` is `from_columns`, referencing the `to` dataset's `to_columns`.
 ```
 
 ```sql
-`tpcds.public.store_sales` AS store_sales_to_customer
-  KEY(ss_item_sk, ss_ticket_number)
-  SOURCE KEY(ss_item_sk, ss_ticket_number) REFERENCES store_sales(ss_item_sk, ss_ticket_number)
-  DESTINATION KEY(ss_customer_sk) REFERENCES customer(c_customer_sk)
+  `tpcds.public.store_sales` AS store_sales_to_customer
+    KEY(ss_item_sk, ss_ticket_number)
+    SOURCE KEY(ss_item_sk, ss_ticket_number) REFERENCES store_sales(ss_item_sk, ss_ticket_number)
+    DESTINATION KEY(ss_customer_sk) REFERENCES customer(c_customer_sk)
 ```
 
 Composite join columns keep their order and are matched positionally:
@@ -311,7 +314,10 @@ metrics:
 ```
 
 ```sql
-MEASURE(SUM(ss_ext_sales_price)) AS total_sales OPTIONS(description="Total sales revenue across all transactions\n\nSynonyms: total revenue, gross sales, sales amount")
+    PROPERTIES(
+      ...
+      MEASURE(SUM(ss_ext_sales_price)) AS total_sales OPTIONS(description="Total sales revenue across all transactions\n\nSynonyms: total revenue, gross sales, sales amount")
+    )
 ```
 
 BigQuery accepts these aggregates inside `MEASURE()`: **`SUM`, `AVG`, `COUNT`,
@@ -437,7 +443,17 @@ These are hard requirements — violating one raises a `ConversionError`:
 
 ## Limitations
 
-- **Export only.** BigQuery DDL → Apache Ossie import is not yet implemented.
+- **Export only.** BigQuery DDL → Apache Ossie import is not implemented, by
+  design (matching the `snowflake` and `polaris` spokes). Ossie is the authoring
+  source of truth; the graph DDL is a generated, deliberately **lossy** deployment
+  artifact, so it is not a faithful round-trip source. The export folds synonyms
+  into free-text descriptions, drops keyless datasets, and skips cross-table
+  metrics — none of which an importer could reconstruct back into the original
+  model. Parsing `CREATE PROPERTY GRAPH` GoogleSQL is also a substantial effort of
+  its own (no off-the-shelf parser handles it yet). The
+  `convert_bq_graph_to_ossie` entry point and `import` subcommand are scaffolded —
+  they raise `ConversionError` today — so the CLI and package shape stay stable
+  for a future PR should a concrete import use case arise.
 - **A node needs a key.** A dataset with no `primary_key` cannot be a graph node
   and is **skipped with a warning**; any relationship touching it is dropped too.
 - **A node needs a base table.** Each `source` must be a plain
