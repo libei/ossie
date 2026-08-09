@@ -377,8 +377,8 @@ def _two_ds(rel_extra=None):
 def test_edge_source_and_destination_keys():
   out = _convert(_two_ds())
   assert "`c.s.orders` AS o_to_c" in out
-  assert "SOURCE KEY(order_id) REFERENCES orders(order_id)" in out
-  assert "DESTINATION KEY(cust_id) REFERENCES customer(c_id)" in out
+  assert "SOURCE KEY (order_id) REFERENCES orders (order_id)" in out
+  assert "DESTINATION KEY (cust_id) REFERENCES customer (c_id)" in out
 
 
 def test_edge_key_is_from_primary_key():
@@ -410,8 +410,8 @@ def test_composite_edge_columns_preserve_order():
       }],
   )
   out = _convert(ossie)
-  assert "SOURCE KEY(o1, o2) REFERENCES orders(o1, o2)" in out
-  assert "DESTINATION KEY(fa, fb) REFERENCES customer(c1, c2)" in out
+  assert "SOURCE KEY (o1, o2) REFERENCES orders (o1, o2)" in out
+  assert "DESTINATION KEY (fa, fb) REFERENCES customer (c1, c2)" in out
 
 
 def test_relationship_to_unknown_dataset_raises():

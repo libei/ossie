@@ -127,28 +127,28 @@ ossie-bigquery export -i sales.yaml -o sales_graph.sql
 
 ```sql
 CREATE OR REPLACE PROPERTY GRAPH sales_graph
-NODE TABLES (
-  `my_project.sales.orders` AS orders
-    KEY(order_id)
-    PROPERTIES(
-      order_id,
-      amount OPTIONS(description="Order total in USD"),
-      MEASURE(SUM(amount)) AS total_revenue OPTIONS(description="Total order revenue")
-    ),
-  `my_project.sales.customer` AS customer
-    KEY(customer_id)
-    PROPERTIES(
-      customer_id,
-      country
-    )
-)
-EDGE TABLES (
-  `my_project.sales.orders` AS orders_to_customer
-    KEY(order_id)
-    SOURCE KEY(order_id) REFERENCES orders(order_id)
-    DESTINATION KEY(customer_id) REFERENCES customer(customer_id)
-)
-OPTIONS(description="Minimal sales model");
+  NODE TABLES (
+    `my_project.sales.orders` AS orders
+      KEY(order_id)
+      PROPERTIES(
+        order_id,
+        amount OPTIONS(description="Order total in USD"),
+        MEASURE(SUM(amount)) AS total_revenue OPTIONS(description="Total order revenue")
+      ),
+    `my_project.sales.customer` AS customer
+      KEY(customer_id)
+      PROPERTIES(
+        customer_id,
+        country
+      )
+  )
+  EDGE TABLES (
+    `my_project.sales.orders` AS orders_to_customer
+      KEY(order_id)
+      SOURCE KEY (order_id) REFERENCES orders (order_id)
+      DESTINATION KEY (customer_id) REFERENCES customer (customer_id)
+  )
+  OPTIONS(description="Minimal sales model");
 ```
 
 [Deploy it](#deploying-the-ddl), then get revenue per country without
@@ -219,8 +219,10 @@ Each rule below shows the Ossie input and the emitted DDL, adapted from the
 [`examples/tpcds_semantic_model.yaml`](../../examples/tpcds_semantic_model.yaml)
 model that ships with Ossie (some fields trimmed for brevity). Each SQL block is
 an **excerpt** of the single `CREATE OR REPLACE PROPERTY GRAPH` statement, shown
-with the exact indentation the converter emits — node and edge entries are nested
-two spaces inside `NODE TABLES (…)` / `EDGE TABLES (…)`.
+with the exact indentation the converter emits — following BigQuery's canonical
+layout, `NODE TABLES` / `EDGE TABLES` nest under `CREATE`, each element table
+nests under those, and its clauses nest again (so a node entry sits at four
+spaces).
 
 ### Dataset → node table
 
@@ -247,13 +249,13 @@ becomes the `KEY`. `fields` become properties, and `description` +
 ```
 
 ```sql
-  `tpcds.public.customer` AS customer
-    KEY(c_customer_sk)
-    OPTIONS(description="Customer dimension with demographic information\n\nSynonyms: customers, shoppers, buyers")
-    PROPERTIES(
-      c_customer_sk,
-      c_first_name || ' ' || c_last_name AS customer_full_name OPTIONS(description="Customer full name (computed field)")
-    )
+    `tpcds.public.customer` AS customer
+      KEY(c_customer_sk)
+      OPTIONS(description="Customer dimension with demographic information\n\nSynonyms: customers, shoppers, buyers")
+      PROPERTIES(
+        c_customer_sk,
+        c_first_name || ' ' || c_last_name AS customer_full_name OPTIONS(description="Customer full name (computed field)")
+      )
 ```
 
 - A field whose expression is just its own column name emits as a **bare
@@ -279,10 +281,10 @@ KEY` is `from_columns`, referencing the `to` dataset's `to_columns`.
 ```
 
 ```sql
-  `tpcds.public.store_sales` AS store_sales_to_customer
-    KEY(ss_item_sk, ss_ticket_number)
-    SOURCE KEY(ss_item_sk, ss_ticket_number) REFERENCES store_sales(ss_item_sk, ss_ticket_number)
-    DESTINATION KEY(ss_customer_sk) REFERENCES customer(c_customer_sk)
+    `tpcds.public.store_sales` AS store_sales_to_customer
+      KEY(ss_item_sk, ss_ticket_number)
+      SOURCE KEY (ss_item_sk, ss_ticket_number) REFERENCES store_sales (ss_item_sk, ss_ticket_number)
+      DESTINATION KEY (ss_customer_sk) REFERENCES customer (c_customer_sk)
 ```
 
 Composite join columns keep their order and are matched positionally:
@@ -314,10 +316,10 @@ metrics:
 ```
 
 ```sql
-    PROPERTIES(
-      ...
-      MEASURE(SUM(ss_ext_sales_price)) AS total_sales OPTIONS(description="Total sales revenue across all transactions\n\nSynonyms: total revenue, gross sales, sales amount")
-    )
+      PROPERTIES(
+        ...
+        MEASURE(SUM(ss_ext_sales_price)) AS total_sales OPTIONS(description="Total sales revenue across all transactions\n\nSynonyms: total revenue, gross sales, sales amount")
+      )
 ```
 
 BigQuery accepts these aggregates inside `MEASURE()`: **`SUM`, `AVG`, `COUNT`,

@@ -176,15 +176,15 @@ def _convert_model(model):
 
   blocks = [
       f"CREATE OR REPLACE PROPERTY GRAPH {_qualify_graph(model_name)}",
-      "NODE TABLES (\n" + ",\n".join(node_tables) + "\n)",
+      _table_group("NODE TABLES", node_tables),
   ]
   if edge_tables:
-    blocks.append("EDGE TABLES (\n" + ",\n".join(edge_tables) + "\n)")
+    blocks.append(_table_group("EDGE TABLES", edge_tables))
   graph_opts = _options_clause(
       description_of(model), synonyms_of(model.get("ai_context"))
   )
   if graph_opts:
-    blocks.append(graph_opts)
+    blocks.append(_line(1, graph_opts))
   return "\n".join(blocks) + ";\n"
 
 
@@ -235,8 +235,8 @@ def _render_node_table(name, ds, measures):
   properties.extend(measures)
 
   lines = [
-      _line(1, f"{table} AS {name}"),
-      _line(2, f"KEY({', '.join(ds['primary_key'])})"),
+      _line(2, f"{table} AS {name}"),
+      _line(3, f"KEY({', '.join(ds['primary_key'])})"),
   ]
   # Element-table description attaches to the DEFAULT LABEL: after the KEY
   # clause, before PROPERTIES (grammar: element_table_definition).
@@ -244,7 +244,7 @@ def _render_node_table(name, ds, measures):
       description_of(ds), synonyms_of(ds.get("ai_context"))
   )
   if label_opts:
-    lines.append(_line(2, label_opts))
+    lines.append(_line(3, label_opts))
   if properties:
     lines.append(_properties_block(properties))
   return "\n".join(lines)
@@ -287,24 +287,24 @@ def _render_edge_table(model_name, rel, datasets):
   source_key = from_ds["primary_key"]
 
   lines = [
-      _line(1, f"{backing} AS {rel_name}"),
-      _line(2, f"KEY({', '.join(source_key)})"),
+      _line(2, f"{backing} AS {rel_name}"),
+      _line(3, f"KEY({', '.join(source_key)})"),
       _line(
-          2,
-          f"SOURCE KEY({', '.join(source_key)}) REFERENCES"
-          f" {frm}({', '.join(source_key)})",
+          3,
+          f"SOURCE KEY ({', '.join(source_key)}) REFERENCES"
+          f" {frm} ({', '.join(source_key)})",
       ),
       _line(
-          2,
-          f"DESTINATION KEY({', '.join(from_cols)}) REFERENCES"
-          f" {to}({', '.join(to_cols)})",
+          3,
+          f"DESTINATION KEY ({', '.join(from_cols)}) REFERENCES"
+          f" {to} ({', '.join(to_cols)})",
       ),
   ]
   label_opts = _options_clause(
       description_of(rel), synonyms_of(rel.get("ai_context"))
   )
   if label_opts:
-    lines.append(_line(2, label_opts))
+    lines.append(_line(3, label_opts))
   return "\n".join(lines)
 
 
@@ -374,9 +374,19 @@ def _line(depth, text):
   return _INDENT * depth + text
 
 
+def _table_group(keyword, entries):
+  """Render a graph-level `NODE TABLES (...)` / `EDGE TABLES (...)` clause and its
+
+  entries, indented one level under the CREATE statement (BigQuery's canonical
+  layout: the clause keyword nests under CREATE, each element table under that).
+  """
+  inner = ",\n".join(entries)
+  return f"{_line(1, keyword + ' (')}\n{inner}\n{_line(1, ')')}"
+
+
 def _properties_block(properties):
-  body = ",\n".join(_line(3, p) for p in properties)
-  return f"{_line(2, 'PROPERTIES(')}\n{body}\n{_line(2, ')')}"
+  body = ",\n".join(_line(4, p) for p in properties)
+  return f"{_line(3, 'PROPERTIES(')}\n{body}\n{_line(3, ')')}"
 
 
 def _quote(s):
