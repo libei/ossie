@@ -15,151 +15,88 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Literal-aware helpers for the dataset-qualified SQL expressions in a model.
+"""Dataset-qualifier analysis for the SQL expressions in a semantic model.
 
-Apache Ossie metrics reference columns as `<dataset>.<column>`. Detecting and
-stripping those qualifiers must ignore text inside string literals, so a value
-such as 'orders.note' is treated as data, not as a reference to the `orders`
-dataset. A measure binds to exactly one table, so which dataset a metric
-expression references decides where the MEASURE lands -- getting this right
-matters.
+Apache Ossie fields and metrics reference columns as `<dataset>.<column>`.
+Turning a metric into a MEASURE needs three facts about its expression: which
+datasets it references (a MEASURE binds to exactly one table), the same
+expression rewritten table-local (with the owning `<dataset>.` qualifier
+dropped), and the columns it aggregates (which must be exposed as graph
+properties).
+
+Each fact is read from the parsed expression's column nodes via sqlglot, not by
+scanning text -- so string literals, function names, keywords, and type names
+are handled by the grammar rather than by special cases.
 """
 
-import re
+import sqlglot
+import sqlglot.expressions as exp
 
-# Matches a single- or double-quoted SQL string literal, honoring backslash
-# escapes. (Triple-quoted / raw literals are uncommon in these expressions and
-# are treated as ordinary text.)
-_STRING_LITERAL = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
+# Expressions are BigQuery SQL by the time they are emitted, so parse and
+# regenerate in that dialect for faithful rendering.
+_DIALECT = "bigquery"
 
 
-def _blank_string_literals(expression):
-  """Blank out string-literal contents, keeping length so offsets don't shift.
+def _parse(expression):
+  """Parse a SQL expression into a sqlglot tree, or None if it will not parse.
 
-  Scanning then sees literal-free text at the original character positions.
+  An unparseable expression is treated as referencing nothing and is left
+  unchanged, matching how the converter warns-and-skips other lossy input.
   """
-  return _STRING_LITERAL.sub(lambda m: " " * len(m.group(0)), expression)
-
-
-def _map_outside_string_literals(expression, fn):
-  """Apply `fn` to the parts of `expression` outside string literals.
-
-  Each string literal is left verbatim; only the text between literals passes
-  through `fn`.
-  """
-  out = []
-  last = 0
-  for m in _STRING_LITERAL.finditer(expression):
-    out.append(fn(expression[last : m.start()]))
-    out.append(m.group(0))
-    last = m.end()
-  out.append(fn(expression[last:]))
-  return "".join(out)
-
-
-def _entity_qualifier(name, flags=0):
-  """Build a regex matching a `<name>.` qualifier, bare or backtick-quoted.
-
-  A negative lookbehind keeps `name` from matching inside a larger identifier
-  (e.g. `customer_orders.` when `name` is `orders`), and the optional backticks
-  let it match whether or not the identifier is quoted (`` `name`. ``).
-  """
-  return re.compile(r"(?<![\w`])`?" + re.escape(name) + r"`?\.", flags)
+  try:
+    return sqlglot.parse_one(expression, dialect=_DIALECT)
+  except sqlglot.errors.SqlglotError:
+    return None
 
 
 def referenced_datasets(expression, dataset_names):
-  """Return the datasets whose `<name>.` qualifier appears in an expression.
+  """Return the datasets whose columns `expression` references.
 
-  Names come back in first-appearance order, ignoring text inside string
-  literals.
+  Only names in `dataset_names` are returned, de-duplicated and in the order
+  they are encountered. A measure binds to one table, so a metric referencing
+  zero or several datasets cannot become a single MEASURE.
   """
-  scannable = _blank_string_literals(expression)
-  hits = []
-  for name in dataset_names:
-    m = _entity_qualifier(name).search(scannable)
-    if m:
-      hits.append((m.start(), name))
-  hits.sort(key=lambda h: h[0])
-  return [name for _, name in hits]
+  tree = _parse(expression)
+  if tree is None:
+    return []
+  allowed = set(dataset_names)
+  found = []
+  for column in tree.find_all(exp.Column):
+    table = column.table
+    if table in allowed and table not in found:
+      found.append(table)
+  return found
 
 
 def strip_qualifier(expression, dataset):
-  """Remove a `<dataset>.` qualifier so an expression is table-local.
+  """Return `expression` with `<dataset>.` column qualifiers removed.
 
-  Handles the bare and backtick-quoted forms, and leaves text inside string
-  literals untouched.
+  Rewrites e.g. `SUM(orders.amount)` to `SUM(amount)` so the expression is
+  local to its owning node table. Columns qualified by any other name are left
+  intact; an unparseable expression is returned unchanged.
   """
-  pattern = _entity_qualifier(dataset)
-  return _map_outside_string_literals(
-      expression, lambda seg: pattern.sub("", seg)
-  )
-
-
-# Identifiers that can appear in an aggregate expression without being column
-# references: SQL keywords and scalar type names. Used to tell a real column
-# apart from syntax when deciding which columns a MEASURE needs exposed as
-# graph properties.
-_NON_COLUMN_WORDS = frozenset({
-    "DISTINCT",
-    "ALL",
-    "AS",
-    "AND",
-    "OR",
-    "NOT",
-    "NULL",
-    "TRUE",
-    "FALSE",
-    "CASE",
-    "WHEN",
-    "THEN",
-    "ELSE",
-    "END",
-    "IN",
-    "IS",
-    "LIKE",
-    "BETWEEN",
-    "CAST",
-    "SAFE_CAST",
-    "INTERVAL",
-    "OVER",
-    # scalar type names (e.g. inside CAST(x AS INT64))
-    "INT64",
-    "FLOAT64",
-    "NUMERIC",
-    "BIGNUMERIC",
-    "STRING",
-    "BOOL",
-    "BOOLEAN",
-    "BYTES",
-    "DATE",
-    "DATETIME",
-    "TIME",
-    "TIMESTAMP",
-    "GEOGRAPHY",
-    "JSON",
-    "ARRAY",
-    "STRUCT",
-})
-
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+  tree = _parse(expression)
+  if tree is None:
+    return expression
+  for column in tree.find_all(exp.Column):
+    if column.table == dataset:
+      column.set("table", None)
+  return tree.sql(dialect=_DIALECT)
 
 
 def referenced_columns(expression):
-  """Return the column identifiers referenced in a table-local SQL expression.
+  """Return the bare column names `expression` references, in order.
 
-  Columns come back in first-appearance order. Ignores text inside string
-  literals, function-name identifiers (one immediately followed by `(`), and SQL
-  keywords / type names. A heuristic, not a full parser -- but enough to know
-  which columns a MEASURE needs exposed as properties.
+  Used to expose the columns a MEASURE aggregates as graph properties. Because
+  the names come from the parsed tree's column nodes, keywords, function names,
+  and type names are excluded structurally rather than by a maintained word
+  list.
   """
-  scannable = _blank_string_literals(expression)
-  out = []
-  for m in _IDENT_RE.finditer(scannable):
-    name = m.group(0)
-    if scannable[m.end() :].lstrip().startswith("("):
-      continue  # function call, not a column reference
-    if name.upper() in _NON_COLUMN_WORDS:
-      continue
-    if name not in out:
-      out.append(name)
-  return out
+  tree = _parse(expression)
+  if tree is None:
+    return []
+  names = []
+  for column in tree.find_all(exp.Column):
+    if column.name not in names:
+      names.append(column.name)
+  return names

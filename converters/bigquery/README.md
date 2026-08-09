@@ -75,7 +75,8 @@ pip install apache-ossie-bigquery        # once published to PyPI
 pip install -e .
 ```
 
-The only runtime dependency is `PyYAML`. Python 3.11+.
+Runtime dependencies are `PyYAML` (parsing the model) and `sqlglot` (analyzing
+the SQL expressions). Python 3.11+.
 
 ## Quick start
 

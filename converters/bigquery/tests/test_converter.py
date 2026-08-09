@@ -20,7 +20,7 @@
 import re
 import warnings
 
-from _util import load_fixture, sql_body
+from _util import load_fixture
 from ossie_bigquery import ConversionError
 from ossie_bigquery import converter as exporter
 import pytest
@@ -74,7 +74,7 @@ def _warnings_for(ossie):
 
 def test_tpcds_export_matches_golden():
   out = _convert(load_fixture("tpcds_ossie.yaml"))
-  assert out == sql_body(load_fixture("tpcds_graph.sql"))
+  assert out == load_fixture("tpcds_graph.sql")
 
 
 def test_tpcds_export_warns_only_on_cross_dataset_metric():

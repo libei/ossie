@@ -25,20 +25,3 @@ FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
 def load_fixture(name):
   with open(FIXTURES / name) as fh:
     return fh.read()
-
-
-def sql_body(text):
-  """Strip a leading block of `--` license/comment lines (and the blank lines
-
-  around it) so a golden `.sql` fixture can carry the ASF header while the
-  comparison sees only the emitted DDL.
-  """
-  lines = text.splitlines(keepends=True)
-  i = 0
-  while i < len(lines):
-    stripped = lines[i].strip()
-    if stripped == "" or stripped.startswith("--"):
-      i += 1
-      continue
-    break
-  return "".join(lines[i:])
