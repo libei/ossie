@@ -468,9 +468,10 @@ These are hard requirements — violating one raises a `ConversionError`:
   `KEY` is referenced by no edge. The converter warns (but still emits) if the
   graph has zero or several roots.
 - **Dialect.** A `BIGQUERY` or `ANSI_SQL` expression is used verbatim; any other
-  SQL dialect (e.g. `SNOWFLAKE`, `DATABRICKS`) is transpiled to BigQuery with
-  sqlglot. Only a non-SQL dialect (`MDX`, `TABLEAU`, `MAQL`) — or no expression
-  at all — is skipped with a warning.
+  SQL dialect is transpiled to BigQuery with sqlglot. The transpilable set is
+  whatever sqlglot recognizes, so a SQL dialect added to the core spec is picked
+  up automatically. An expression given only in a dialect sqlglot does not know
+  (a non-SQL one), or in no dialect at all, is skipped with a warning.
 
 ## Warnings reference
 
@@ -484,7 +485,7 @@ element it concerns in brackets, e.g. `[customer_lifetime_value] metric spans �
 | `spans multiple tables … cannot be a single MEASURE` | cross-dataset metric | recompute it at query time from component measures |
 | `references no known dataset … cannot be a single MEASURE` | metric has no `<dataset>.` qualifier | qualify the columns, or compute at query time |
 | `does not begin with a supported aggregate` | measure body isn't `SUM/AVG/COUNT/MIN/MAX` | fine if BigQuery accepts it; otherwise rewrite the metric |
-| `no BigQuery-convertible SQL expression` | only a non-SQL dialect (MDX/TABLEAU/MAQL), or no expression | add a SQL dialect (`BIGQUERY`, `ANSI_SQL`, `SNOWFLAKE`, `DATABRICKS`) |
+| `no BigQuery-convertible SQL expression` | only a dialect sqlglot can't read (a non-SQL one), or no expression | add a SQL dialect expression (`BIGQUERY` or `ANSI_SQL` is used verbatim; other SQL dialects are transpiled) |
 | `not a plain project.dataset.table identifier` | `source` isn't a base table | point `source` at a table, not a subquery |
 | `graph has no root node table` / `multiple root node tables` | not exactly one root | adjust relationships so one node has no incoming edge |
 | `multiple semantic models found` | more than one model in the file | split them, or accept only the first being used |

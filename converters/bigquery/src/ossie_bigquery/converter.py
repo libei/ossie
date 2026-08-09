@@ -40,8 +40,9 @@ carried through as first-class options rather than folded into free text.
 
 Expression SQL is taken in whichever dialect the model provides: a BigQuery or
 ANSI_SQL expression is used verbatim (BigQuery is an ANSI superset), and any
-other SQL dialect (e.g. Snowflake, Databricks) is transpiled to BigQuery with
-sqlglot.
+other SQL dialect is transpiled to BigQuery with sqlglot. The set of
+transpilable dialects is whatever sqlglot recognizes, so a SQL dialect added to
+the core spec later needs no change here.
 
 The core `apache-ossie` package owns the model schema, so parsing and
 structural validation are delegated to its pydantic models rather than
@@ -79,22 +80,12 @@ SUPPORTED_AGGREGATES = ("SUM", "AVG", "COUNT", "MIN", "MAX")
 # to before it is parsed or regenerated.
 _BIGQUERY = "bigquery"
 
-# Ossie SQL dialects mapped to their sqlglot names. BigQuery and ANSI_SQL are
-# used verbatim; the rest are transpiled from these names to BigQuery. Non-SQL
-# dialects (MDX, TABLEAU, MAQL) are absent -- they have no BigQuery rendering.
-_SQLGLOT_DIALECT = {
-    OSIDialect.SNOWFLAKE: "snowflake",
-    OSIDialect.DATABRICKS: "databricks",
-}
-
-# Preference order when an expression offers several dialects. BigQuery and
-# ANSI_SQL need no transpilation, so they win when present.
-_DIALECT_PREFERENCE = (
-    OSIDialect.BIGQUERY,
-    OSIDialect.ANSI_SQL,
-    OSIDialect.SNOWFLAKE,
-    OSIDialect.DATABRICKS,
-)
+# Dialects whose SQL is already valid BigQuery and so is used verbatim, in
+# preference order. BigQuery is an ANSI superset, so an ANSI_SQL expression
+# needs no transpilation either. Any other SQL dialect is transpiled (see
+# `_sqlglot_dialect`); these two are preferred because they carry no transpile
+# risk.
+_VERBATIM_DIALECTS = (OSIDialect.BIGQUERY, OSIDialect.ANSI_SQL)
 
 # All generated indentation flows through this single mechanism: one nesting
 # level == one INDENT. Deriving every indent from `depth` (rather than
@@ -237,10 +228,10 @@ def _convert_model(model):
 
   blocks = [
       f"CREATE OR REPLACE PROPERTY GRAPH {_qualify_graph(model.name)}",
-      _table_group("NODE TABLES", node_tables),
+      _render_tables_clause("NODE TABLES", node_tables),
   ]
   if edge_tables:
-    blocks.append(_table_group("EDGE TABLES", edge_tables))
+    blocks.append(_render_tables_clause("EDGE TABLES", edge_tables))
   graph_opts = _options_clause(_description_of(model), _synonyms_of(model))
   if graph_opts:
     blocks.append(_line(1, graph_opts))
@@ -328,7 +319,7 @@ def _render_node_table(ds, measures):
   if label:
     lines.append(_line(3, label))
   if properties:
-    lines.append(_properties_block(properties))
+    lines.append(_render_properties_clause(properties))
   return "\n".join(lines)
 
 
@@ -428,26 +419,51 @@ def _pick_expression(expression, what):
 
   A BigQuery or ANSI_SQL dialect is used verbatim (BigQuery is an ANSI
   superset); any other SQL dialect is transpiled to BigQuery with sqlglot.
-  Non-SQL dialects (MDX, TABLEAU, MAQL) have no BigQuery rendering and yield
-  None, leaving the caller to warn and skip.
+  Non-SQL dialects (e.g. MDX, MAQL) have no BigQuery rendering and yield None,
+  leaving the caller to warn and skip.
   """
   by_dialect = {d.dialect: d.expression for d in expression.dialects}
-  for dialect in _DIALECT_PREFERENCE:
+  for dialect in _VERBATIM_DIALECTS:
     sql = by_dialect.get(dialect)
-    if sql is None:
-      continue
-    if dialect in (OSIDialect.BIGQUERY, OSIDialect.ANSI_SQL):
+    if sql is not None:
       return sql
-    return _transpile(sql, _SQLGLOT_DIALECT[dialect], what)
+  # Otherwise transpile the first dialect sqlglot recognizes, in the order the
+  # model declares them. Resolving the sqlglot dialect by name (rather than a
+  # hardcoded table) means a SQL dialect added to the core spec later is picked
+  # up automatically, and a non-SQL dialect is simply not recognized and skipped
+  # -- neither case needs a change here.
+  for d in expression.dialects:
+    if d.dialect in _VERBATIM_DIALECTS:
+      continue
+    name = _sqlglot_dialect(d.dialect)
+    if name is not None:
+      return _transpile(d.expression, name, what)
   return None
+
+
+def _sqlglot_dialect(dialect):
+  """Return the sqlglot dialect name for an Ossie dialect, or None.
+
+  The name is derived from the dialect value and checked against sqlglot's
+  registry rather than looked up in a fixed table, so a SQL dialect newly added
+  to the core spec transpiles automatically once sqlglot supports it. A dialect
+  sqlglot does not know -- a non-SQL one such as MDX or MAQL -- yields None.
+  """
+  name = dialect.value.lower()
+  try:
+    sqlglot.Dialect.get_or_raise(name)
+  except ValueError:
+    return None
+  return name
 
 
 def _transpile(sql, read_dialect, what):
   """Transpile `sql` from `read_dialect` to BigQuery.
 
-  Rewrites dialect-specific constructs BigQuery does not share (e.g. Snowflake
-  `IFF`/`NVL`) to their BigQuery form. If sqlglot cannot parse the expression,
-  it is passed through unchanged with a warning rather than dropped.
+  Rewrites dialect-specific constructs BigQuery does not share (conditional and
+  null-handling functions, quoting, and the like) into their BigQuery form. If
+  sqlglot cannot parse the expression, it is passed through unchanged with a
+  warning rather than dropped.
   """
   try:
     return sqlglot.transpile(sql, read=read_dialect, write=_BIGQUERY)[0]
@@ -550,17 +566,20 @@ def _line(depth, text):
   return _INDENT * depth + text
 
 
-def _table_group(keyword, entries):
-  """Render a `NODE TABLES (...)` / `EDGE TABLES (...)` clause and its entries.
+def _render_tables_clause(keyword, entries):
+  """Render a `NODE TABLES (...)` or `EDGE TABLES (...)` clause.
 
-  The clause keyword is indented one level under the CREATE statement and each
-  element table one level under that -- BigQuery's canonical graph layout.
+  `keyword` is `"NODE TABLES"` or `"EDGE TABLES"` and `entries` are the rendered
+  element tables that go inside its parentheses. The keyword is indented one
+  level under the CREATE statement and each element table one level under that
+  -- BigQuery's canonical graph layout.
   """
   inner = ",\n".join(entries)
   return f"{_line(1, keyword + ' (')}\n{inner}\n{_line(1, ')')}"
 
 
-def _properties_block(properties):
+def _render_properties_clause(properties):
+  """Render a node table's `PROPERTIES(...)` clause from rendered entries."""
   body = ",\n".join(_line(4, p) for p in properties)
   return f"{_line(3, 'PROPERTIES(')}\n{body}\n{_line(3, ')')}"
 
