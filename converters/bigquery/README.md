@@ -28,8 +28,8 @@ single `CREATE OR REPLACE PROPERTY GRAPH` statement (SQL) comes out. It never
 connects to BigQuery, reads no data, and creates or deploys nothing — you run the
 emitted DDL yourself.
 
-It is **export-only** (Ossie → BigQuery Graph DDL), like the `snowflake` and
-`polaris` spokes.
+It is **export-only** (Ossie → BigQuery Graph DDL), like several other
+export-only spokes in this repo.
 
 ## Contents
 
@@ -58,7 +58,7 @@ with model-level metrics. That maps directly onto BigQuery Graph's native model:
 | `relationship` (`from`/`to`/`from_columns`/`to_columns`) | **EDGE TABLE** — `SOURCE KEY … REFERENCES` / `DESTINATION KEY … REFERENCES` |
 | single-table `metric` | `MEASURE(<agg>) AS <name>` in the owning node's `PROPERTIES` |
 | `field` | graph property (bare column, or `<expr> AS <name>` for a computed field) |
-| `description` + `ai_context.synonyms` | `OPTIONS(description="…")` |
+| `description` + `ai_context.synonyms` | `OPTIONS(description="…", synonyms=["…"])` |
 
 A graph **measure** binds an aggregate to exactly one table's `KEY`. BigQuery then
 keeps the aggregate correct even when a join fans the rows out — the aggregation
@@ -75,8 +75,9 @@ pip install apache-ossie-bigquery        # once published to PyPI
 pip install -e .
 ```
 
-Runtime dependencies are `PyYAML` (parsing the model) and `sqlglot` (analyzing
-the SQL expressions). Python 3.11+.
+Runtime dependencies are `apache-ossie` (the core package, whose pydantic models
+parse and validate the model), `PyYAML` (reading the YAML), and `sqlglot`
+(analyzing and transpiling the SQL expressions). Python 3.11+.
 
 ## Quick start
 
@@ -225,7 +226,8 @@ spaces).
 The `source` (a `project.dataset.table` reference) backs the node table and is
 backtick-quoted once; the node's label is the dataset `name`; `primary_key`
 becomes the `KEY`. `fields` become properties, and `description` +
-`ai_context.synonyms` fold into `OPTIONS(description=…)`.
+`ai_context.synonyms` attach to the element's `DEFAULT LABEL` as native
+`OPTIONS(description=…, synonyms=[…])`.
 
 ```yaml
 - name: customer
@@ -247,7 +249,7 @@ becomes the `KEY`. `fields` become properties, and `description` +
 ```sql
     `tpcds.public.customer` AS customer
       KEY(c_customer_sk)
-      OPTIONS(description="Customer dimension with demographic information\n\nSynonyms: customers, shoppers, buyers")
+      DEFAULT LABEL OPTIONS(description="Customer dimension with demographic information", synonyms=["customers", "shoppers", "buyers"])
       PROPERTIES(
         c_customer_sk,
         c_first_name || ' ' || c_last_name AS customer_full_name OPTIONS(description="Customer full name (computed field)")
@@ -259,8 +261,10 @@ becomes the `KEY`. `fields` become properties, and `description` +
   `<expr> AS <name>` — a **computed property**.
 - A composite `primary_key` keeps its column order: `primary_key: [ss_item_sk,
   ss_ticket_number]` → `KEY(ss_item_sk, ss_ticket_number)`.
-- BigQuery Graph has no synonyms slot, so synonyms are appended to the
-  description as `Synonyms: a, b, c`.
+- `description` and `ai_context.synonyms` map onto BigQuery's native label
+  options — `description="…"` and a `synonyms=["a", "b", "c"]` array — rather
+  than being folded into one another. Element metadata attaches to the
+  `DEFAULT LABEL`; per-property metadata attaches inline after the property.
 
 ### Relationship → edge table
 
@@ -297,10 +301,10 @@ See [Metrics and measures](#metrics-and-measures) below.
 ## Metrics and measures
 
 A metric becomes a `MEASURE()` on the single node its aggregate references. The
-converter finds that node by scanning the expression for a `<dataset>.` qualifier
-(ignoring text inside string literals and not matching a name that is merely a
-substring of a longer identifier), then strips that qualifier so the measure body
-is table-local:
+converter finds that node by parsing the expression with sqlglot and reading the
+`<dataset>.` qualifier off its column nodes (so string literals, function names,
+and keywords are handled by the grammar, not by text matching), then strips that
+qualifier so the measure body is table-local:
 
 ```yaml
 metrics:
@@ -314,7 +318,7 @@ metrics:
 ```sql
       PROPERTIES(
         ...
-        MEASURE(SUM(ss_ext_sales_price)) AS total_sales OPTIONS(description="Total sales revenue across all transactions\n\nSynonyms: total revenue, gross sales, sales amount")
+        MEASURE(SUM(ss_ext_sales_price)) AS total_sales OPTIONS(description="Total sales revenue across all transactions", synonyms=["total revenue", "gross sales", "sales amount"])
       )
 ```
 
@@ -448,12 +452,11 @@ These are hard requirements — violating one raises a `ConversionError`:
 ## Limitations
 
 - **Export only.** There is no BigQuery Graph DDL → Apache Ossie import, by
-  design (matching the `snowflake` and `polaris` spokes). Ossie is the authoring
+  design (matching the other export-only spokes). Ossie is the authoring
   source of truth; the graph DDL is a generated, deliberately **lossy** deployment
-  artifact, so it is not a faithful round-trip source. The export folds synonyms
-  into free-text descriptions, drops keyless datasets, and skips cross-table
-  metrics — none of which an importer could reconstruct back into the original
-  model.
+  artifact, so it is not a faithful round-trip source. The export drops keyless
+  datasets, skips cross-table metrics, and transpiles non-BigQuery SQL — none of
+  which an importer could reconstruct back into the original model.
 - **A node needs a key.** A dataset with no `primary_key` cannot be a graph node
   and is **skipped with a warning**; any relationship touching it is dropped too.
 - **A node needs a base table.** Each `source` must be a plain
@@ -464,8 +467,10 @@ These are hard requirements — violating one raises a `ConversionError`:
 - **Exactly one root.** BigQuery requires exactly one root node table — one whose
   `KEY` is referenced by no edge. The converter warns (but still emits) if the
   graph has zero or several roots.
-- **Dialect.** Expressions use the `BIGQUERY` dialect, falling back to
-  `ANSI_SQL`. A field/metric with neither is skipped with a warning.
+- **Dialect.** A `BIGQUERY` or `ANSI_SQL` expression is used verbatim; any other
+  SQL dialect (e.g. `SNOWFLAKE`, `DATABRICKS`) is transpiled to BigQuery with
+  sqlglot. Only a non-SQL dialect (`MDX`, `TABLEAU`, `MAQL`) — or no expression
+  at all — is skipped with a warning.
 
 ## Warnings reference
 
@@ -479,7 +484,7 @@ element it concerns in brackets, e.g. `[customer_lifetime_value] metric spans �
 | `spans multiple tables … cannot be a single MEASURE` | cross-dataset metric | recompute it at query time from component measures |
 | `references no known dataset … cannot be a single MEASURE` | metric has no `<dataset>.` qualifier | qualify the columns, or compute at query time |
 | `does not begin with a supported aggregate` | measure body isn't `SUM/AVG/COUNT/MIN/MAX` | fine if BigQuery accepts it; otherwise rewrite the metric |
-| `has no BIGQUERY or ANSI_SQL expression` | no usable dialect for a field/metric | add a `BIGQUERY` or `ANSI_SQL` dialect |
+| `no BigQuery-convertible SQL expression` | only a non-SQL dialect (MDX/TABLEAU/MAQL), or no expression | add a SQL dialect (`BIGQUERY`, `ANSI_SQL`, `SNOWFLAKE`, `DATABRICKS`) |
 | `not a plain project.dataset.table identifier` | `source` isn't a base table | point `source` at a table, not a subquery |
 | `graph has no root node table` / `multiple root node tables` | not exactly one root | adjust relationships so one node has no incoming edge |
 | `multiple semantic models found` | more than one model in the file | split them, or accept only the first being used |
@@ -493,4 +498,5 @@ uv run pytest
 
 The test suite includes a golden-file export (`tests/fixtures/tpcds_ossie.yaml` →
 `tests/fixtures/tpcds_graph.sql`) plus unit tests for measure placement, edge
-keys, root validation, dialect fallback, and description folding.
+keys, root validation, dialect selection and transpilation, and OPTIONS
+(description + synonyms) emission.

@@ -16,9 +16,9 @@
 # under the License.
 
 # A trimmed TPC-DS star used as the export golden fixture. It exercises: a
-# composite node KEY, single-column edges, a computed-field property, descriptions
-# + synonyms folded into OPTIONS, a single-table metric (-> MEASURE), and a
-# cross-dataset metric (-> skipped with a warning).
+# composite node KEY, single-column edges, a computed-field property,
+# descriptions + synonyms as native OPTIONS, a single-table metric
+# (-> MEASURE), and a cross-dataset metric (-> skipped with a warning).
 
 version: "0.2.0.dev0"
 

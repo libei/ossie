@@ -17,10 +17,10 @@
 
 """Tests for the Apache Ossie -> BigQuery property-graph exporter."""
 
+import pathlib
 import re
 import warnings
 
-from _util import load_fixture
 from ossie_bigquery import ConversionError
 from ossie_bigquery import converter as exporter
 import pytest
@@ -28,8 +28,14 @@ import yaml
 
 V = exporter.OSSIE_VERSION
 
+_FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
+
 
 # --- helpers ---------------------------------------------------------------
+
+
+def load_fixture(name):
+  return (_FIXTURES / name).read_text()
 
 
 def _expr(sql, dialect="ANSI_SQL"):
@@ -139,14 +145,19 @@ def test_multiple_models_warns_and_uses_first():
 
 
 def test_missing_dataset_name_raises_clean_error():
+  # A schema violation (here, a dataset with no `name`) surfaces through the
+  # core `apache-ossie` validator as a clean ConversionError, not a traceback.
   ossie = yaml.safe_dump({
       "version": V,
       "semantic_model": [
           {"name": "m", "datasets": [{"source": "c.s.t", "primary_key": ["k"]}]}
       ],
   })
-  with pytest.raises(ConversionError, match="missing required 'name'"):
+  with pytest.raises(
+      ConversionError, match="Invalid Apache Ossie model"
+  ) as exc:
     exporter.convert_ossie_to_bq_graph(ossie)
+  assert "name" in str(exc.value)
 
 
 def test_duplicate_dataset_name_rejected():
@@ -231,22 +242,40 @@ def test_computed_field_uses_expr_as_name():
 
 
 def test_field_without_usable_dialect_is_dropped_with_warning():
+  # MDX is not SQL, so it has no BigQuery rendering and the field is dropped.
   ossie = _model([{
       "name": "f",
       "source": "c.s.f",
       "primary_key": ["k"],
       "fields": [
           {"name": "keep", "expression": _expr("keep")},
-          {"name": "drop", "expression": _expr("d", dialect="SNOWFLAKE")},
+          {"name": "drop", "expression": _expr("d", dialect="MDX")},
       ],
   }])
   out = _convert(ossie)
   assert "keep" in out
   assert "AS drop" not in out
   assert any(
-      "drop" in m and "no BIGQUERY or ANSI_SQL" in m
+      "drop" in m and "no BigQuery-convertible SQL" in m
       for m in _warnings_for(ossie)
   )
+
+
+def test_snowflake_field_is_transpiled_to_bigquery():
+  # A non-BigQuery SQL dialect is transpiled rather than dropped: Snowflake's
+  # IFF(...) becomes BigQuery's IF(...).
+  ossie = _model([{
+      "name": "f",
+      "source": "c.s.f",
+      "primary_key": ["k"],
+      "fields": [{
+          "name": "flag",
+          "expression": _expr("IFF(a > 0, a, b)", dialect="SNOWFLAKE"),
+      }],
+  }])
+  out = _convert(ossie)
+  assert "IF(a > 0, a, b) AS flag" in out
+  assert "IFF" not in out
 
 
 def test_bigquery_dialect_preferred_over_ansi():
@@ -376,15 +405,32 @@ def test_unsupported_aggregate_single_table_emitted_with_warning():
 
 
 def test_metric_without_usable_dialect_is_skipped_with_warning():
+  # MAQL is not SQL, so the metric has no BigQuery rendering and is skipped.
   ossie = _model(
       [{"name": "orders", "source": "c.s.orders", "primary_key": ["k"]}],
       metrics=[{
           "name": "m",
-          "expression": _expr("SUM(orders.x)", dialect="SNOWFLAKE"),
+          "expression": _expr("SUM(orders.x)", dialect="MAQL"),
       }],
   )
   assert "MEASURE" not in _convert(ossie)
-  assert any("no BIGQUERY or ANSI_SQL" in m for m in _warnings_for(ossie))
+  assert any("no BigQuery-convertible SQL" in m for m in _warnings_for(ossie))
+
+
+def test_metric_in_snowflake_dialect_is_transpiled_and_measured():
+  # Snowflake NVL(...) transpiles to BigQuery COALESCE(...) and still lands as
+  # a single-table MEASURE.
+  ossie = _model(
+      [{"name": "orders", "source": "c.s.orders", "primary_key": ["k"]}],
+      metrics=[{
+          "name": "rev",
+          "expression": _expr(
+              "SUM(NVL(orders.amount, 0))", dialect="SNOWFLAKE"
+          ),
+      }],
+  )
+  out = _convert(ossie)
+  assert "MEASURE(SUM(COALESCE(amount, 0))) AS rev" in out
 
 
 # --- edge tables -----------------------------------------------------------
@@ -552,10 +598,12 @@ def test_no_root_warns_on_cycle():
   assert any("no root node table" in m for m in _warnings_for(ossie))
 
 
-# --- options / description folding -----------------------------------------
+# --- options (description + synonyms) ---------------------------------------
 
 
-def test_synonyms_are_folded_into_description():
+def test_description_and_synonyms_emitted_as_native_options():
+  # Synonyms map onto BigQuery's native `synonyms` array option and attach to
+  # the element's DEFAULT LABEL -- they are not folded into the description.
   ossie = _model([{
       "name": "f",
       "source": "c.s.f",
@@ -564,10 +612,26 @@ def test_synonyms_are_folded_into_description():
       "ai_context": {"synonyms": ["events", "log"]},
   }])
   out = _convert(ossie)
-  assert 'OPTIONS(description="A fact\\n\\nSynonyms: events, log")' in out
+  assert (
+      'DEFAULT LABEL OPTIONS(description="A fact", synonyms=["events", "log"])'
+  ) in out
+
+
+def test_synonyms_only_emit_options_without_description():
+  ossie = _model([{
+      "name": "f",
+      "source": "c.s.f",
+      "primary_key": ["k"],
+      "ai_context": {"synonyms": ["events"]},
+  }])
+  out = _convert(ossie)
+  assert 'DEFAULT LABEL OPTIONS(synonyms=["events"])' in out
+  assert "description=" not in out
 
 
 def test_string_ai_context_folded_into_description():
+  # A string-form ai_context has no options key of its own, so it becomes the
+  # description.
   ossie = _model([{
       "name": "f",
       "source": "c.s.f",
@@ -575,7 +639,7 @@ def test_string_ai_context_folded_into_description():
       "ai_context": "free text note",
   }])
   out = _convert(ossie)
-  assert 'OPTIONS(description="free text note")' in out
+  assert 'DEFAULT LABEL OPTIONS(description="free text note")' in out
 
 
 def test_description_quoting_escapes_specials():
