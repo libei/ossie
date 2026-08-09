@@ -15,14 +15,12 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Apache Ossie <-> BigQuery property-graph converter."""
+"""Apache Ossie -> BigQuery Graph converter (export-only)."""
 
 from ._common import ConversionError
-from .bq_graph_to_ossie import convert_bq_graph_to_ossie
 from .ossie_to_bq_graph import convert_ossie_to_bq_graph
 
 __all__ = [
     "ConversionError",
     "convert_ossie_to_bq_graph",
-    "convert_bq_graph_to_ossie",
 ]

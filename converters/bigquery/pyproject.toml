@@ -27,7 +27,7 @@ dev = [
 [project]
 name = "apache-ossie-bigquery"
 version = "0.2.0.dev0"
-description = "BigQuery property graph (with graph measures) <> Apache Ossie converter"
+description = "Apache Ossie -> BigQuery Graph (with graph measures) converter"
 authors = [{ name = "Apache Software Foundation", email = "dev@ossie.apache.org" }]
 requires-python = ">=3.11"
 readme = "README.md"

@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Apache Ossie semantic model -> BigQuery property-graph DDL.
+"""Apache Ossie semantic model -> BigQuery Graph DDL.
 
 Emits a single `CREATE OR REPLACE PROPERTY GRAPH` statement over the datasets'
 existing base tables, with model-level metrics rendered as inline `MEASURE(...)`
@@ -27,7 +27,7 @@ properties:
   * each single-table `metric` -> a `MEASURE(<agg>) AS <name>` on its owning
   node
 
-A BigQuery graph measure binds an aggregate to exactly one table's KEY; the
+A BigQuery Graph measure binds an aggregate to exactly one table's KEY; the
 cross-table rollup happens at query time via `GRAPH_EXPAND(...) + AGG(...)`. A
 metric whose aggregate genuinely spans multiple datasets cannot be expressed as
 one MEASURE and is skipped with a warning. The converter is a text transform; it
@@ -68,7 +68,7 @@ _TABLE_PART_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
 
 
 def convert_ossie_to_bq_graph(ossie_yaml_str):
-  """Convert an Apache Ossie semantic model (YAML text) to BigQuery property-graph
+  """Convert an Apache Ossie semantic model (YAML text) to BigQuery Graph
 
   DDL (SQL text). Conversions that drop information emit warnings (stderr).
   """
@@ -247,7 +247,7 @@ def _render_node_table(name, ds, measures):
     properties.append(rendered)
     exposed.add(field["name"])
 
-  # A BigQuery graph MEASURE can only aggregate columns that are exposed as
+  # A BigQuery Graph MEASURE can only aggregate columns that are exposed as
   # properties. Expose any column a measure references that no field already
   # declares, so e.g. MEASURE(SUM(credit_limit)) works even when credit_limit
   # is not itself listed as a dimension field.
@@ -432,7 +432,7 @@ def _quote(s):
 def _describe(description, synonyms):
   """Combine a description and synonyms into one metadata string.
 
-  BigQuery graphs have no dedicated synonyms slot, so synonyms are folded into
+  BigQuery Graph has no dedicated synonyms slot, so synonyms are folded into
   the description -- the only metadata sink the graph DDL exposes.
   """
   parts = []

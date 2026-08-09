@@ -20,20 +20,20 @@
 # Apache Ossie BigQuery Converter
 
 Convert an [Apache Ossie](https://github.com/apache/ossie) semantic model into a
-BigQuery [property graph with graph measures](https://docs.cloud.google.com/bigquery/docs/graph-measures).
+[BigQuery Graph](https://docs.cloud.google.com/bigquery/docs/graph-measures)
+(with graph measures).
 
 The converter is an **offline text transform**: an Ossie model (YAML) goes in, a
 single `CREATE OR REPLACE PROPERTY GRAPH` statement (SQL) comes out. It never
 connects to BigQuery, reads no data, and creates or deploys nothing — you run the
 emitted DDL yourself.
 
-- **Export** (`ossie-bigquery export`): Ossie → property-graph DDL.
-- **Import** (`ossie-bigquery import`): not yet implemented (export-only for now,
-  like the `snowflake` and `polaris` spokes).
+It is **export-only** (Ossie → BigQuery Graph DDL), like the `snowflake` and
+`polaris` spokes.
 
 ## Contents
 
-- [Why a property graph](#why-a-property-graph)
+- [Why BigQuery Graph](#why-bigquery-graph)
 - [Install](#install)
 - [Quick start](#quick-start)
 - [CLI reference](#cli-reference)
@@ -47,12 +47,12 @@ emitted DDL yourself.
 - [Warnings reference](#warnings-reference)
 - [Development](#development)
 
-## Why a property graph
+## Why BigQuery Graph
 
 An Ossie semantic model is a star/snowflake of datasets joined by foreign keys,
-with model-level metrics. That maps directly onto BigQuery's native graph model:
+with model-level metrics. That maps directly onto BigQuery Graph's native model:
 
-| Apache Ossie | BigQuery property graph |
+| Apache Ossie | BigQuery Graph |
 | --- | --- |
 | `dataset` (`source` = `project.dataset.table`) | **NODE TABLE** — `KEY` from `primary_key`, `PROPERTIES` from `fields` |
 | `relationship` (`from`/`to`/`from_columns`/`to_columns`) | **EDGE TABLE** — `SOURCE KEY … REFERENCES` / `DESTINATION KEY … REFERENCES` |
@@ -167,14 +167,12 @@ GROUP BY customer_country;
 
 ```
 ossie-bigquery export -i <model.yaml> [-o <graph.sql>]
-ossie-bigquery import -i <graph.sql> [-o <model.yaml>] [--name <model_name>]
 ```
 
-| Flag | Applies to | Meaning |
-| --- | --- | --- |
-| `-i`, `--input` | both | input file (required) |
-| `-o`, `--output` | both | output file; **omit for stdout** |
-| `--name` | `import` | model name to assign (import is not yet implemented) |
+| Flag | Meaning |
+| --- | --- |
+| `-i`, `--input` | input Apache Ossie YAML file (required) |
+| `-o`, `--output` | output `.sql` file; **omit for stdout** |
 
 - With no `-o`, the result goes to **stdout**, so you can pipe it:
   ```bash
@@ -188,7 +186,7 @@ ossie-bigquery import -i <graph.sql> [-o <model.yaml>] [--name <model_name>]
 
 ## Python API
 
-The conversion functions are pure `str -> str`; do file I/O yourself.
+The conversion function is a pure `str -> str`; do file I/O yourself.
 
 ```python
 import warnings
@@ -209,9 +207,6 @@ except ConversionError as e:
 with open("sales_graph.sql", "w") as fh:
     fh.write(ddl)
 ```
-
-`convert_bq_graph_to_ossie(ddl_str, model_name=None)` exists as the import
-entry point but currently raises `ConversionError` (not yet implemented).
 
 ## How the model maps
 
@@ -263,7 +258,7 @@ becomes the `KEY`. `fields` become properties, and `description` +
   `<expr> AS <name>` — a **computed property**.
 - A composite `primary_key` keeps its column order: `primary_key: [ss_item_sk,
   ss_ticket_number]` → `KEY(ss_item_sk, ss_ticket_number)`.
-- BigQuery graphs have no synonyms slot, so synonyms are appended to the
+- BigQuery Graph has no synonyms slot, so synonyms are appended to the
   description as `Synonyms: a, b, c`.
 
 ### Relationship → edge table
@@ -451,17 +446,13 @@ These are hard requirements — violating one raises a `ConversionError`:
 
 ## Limitations
 
-- **Export only.** BigQuery DDL → Apache Ossie import is not implemented, by
+- **Export only.** There is no BigQuery Graph DDL → Apache Ossie import, by
   design (matching the `snowflake` and `polaris` spokes). Ossie is the authoring
   source of truth; the graph DDL is a generated, deliberately **lossy** deployment
   artifact, so it is not a faithful round-trip source. The export folds synonyms
   into free-text descriptions, drops keyless datasets, and skips cross-table
   metrics — none of which an importer could reconstruct back into the original
-  model. Parsing `CREATE PROPERTY GRAPH` GoogleSQL is also a substantial effort of
-  its own (no off-the-shelf parser handles it yet). The
-  `convert_bq_graph_to_ossie` entry point and `import` subcommand are scaffolded —
-  they raise `ConversionError` today — so the CLI and package shape stay stable
-  for a future PR should a concrete import use case arise.
+  model.
 - **A node needs a key.** A dataset with no `primary_key` cannot be a graph node
   and is **skipped with a warning**; any relationship touching it is dropped too.
 - **A node needs a base table.** Each `source` must be a plain

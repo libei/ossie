@@ -15,7 +15,7 @@
 # specific language governing permissions and limitations
 # under the License.
 
-"""Shared helpers for the Apache Ossie -> BigQuery property-graph converter.
+"""Shared helpers for the Apache Ossie -> BigQuery Graph converter.
 
 Export is a pure offline transform: an Apache Ossie semantic model (YAML) in, a
 single `CREATE OR REPLACE PROPERTY GRAPH` statement (SQL text) out. The only
