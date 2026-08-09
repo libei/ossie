@@ -27,7 +27,7 @@ import re
 
 import yaml
 
-# Apache Ossie semantic model spec version this converter targets (see core-spec).
+# Apache Ossie spec version this converter targets (see core-spec/).
 #
 # NOTE: this is an exact-match check (see convert_ossie_to_bq_graph). Like the
 # databricks spoke, this converter intentionally has no `apache-ossie` package
@@ -55,16 +55,12 @@ class ConversionError(Exception):
 
 
 def require(obj, key, what):
-  """Return `obj[key]`, or raise a clean ConversionError if it's missing/empty -- so
+  """Return `obj[key]`, or raise ConversionError if it is missing or empty.
 
-  malformed input surfaces as an error message rather than a raw KeyError
-  traceback.
-
-  Presence is tested by key (not truthiness), so a legitimately falsy value such
-  as
-  `0` or `False` is returned; a missing key, a null, or an empty/whitespace
-  string is
-  rejected.
+  Malformed input then surfaces as a readable message rather than a raw
+  KeyError. Presence is tested by key, not truthiness, so a legitimately falsy
+  value such as `0` or `False` is returned; a missing key, a null, or an
+  empty/whitespace string is rejected.
   """
   if not isinstance(obj, dict) or key not in obj or obj[key] is None:
     raise ConversionError(f"{what} is missing required '{key}'")
@@ -75,11 +71,11 @@ def require(obj, key, what):
 
 
 def require_str(obj, key, what):
-  """Like require(), but also enforce the value is a string -- so a non-string scalar
+  """Like `require`, but also require the value to be a string.
 
-  (e.g. a YAML number for a name or expression) raises a clean ConversionError
-  instead
-  of crashing later in a string operation.
+  A non-string scalar (e.g. a YAML number used where a name or expression is
+  expected) raises a clean ConversionError instead of crashing later in a
+  string operation.
   """
   value = require(obj, key, what)
   if not isinstance(value, str):
@@ -90,12 +86,11 @@ def require_str(obj, key, what):
 
 
 def load_yaml(text):
-  """Parse YAML, surfacing a syntax error as a ConversionError so callers (and the
+  """Parse YAML text, surfacing a syntax error as a ConversionError.
 
-  CLI) get a clean message rather than a raw traceback.
-
-  Plain SafeLoader is fine here: unlike the Metric View spoke, the output is SQL
-  text (not YAML), so there is no `on:`-key round-trip hazard to guard against.
+  Callers (and the CLI) then get a clean message rather than a raw traceback.
+  Plain SafeLoader is fine here: the output is SQL text, not YAML, so there is
+  no `on:`-key round-trip hazard to guard against.
   """
   try:
     return yaml.safe_load(text)
@@ -113,10 +108,10 @@ def is_simple_identifier(expr):
 
 
 def pick_expression(ossie_expression, what):
-  """Choose the SQL string for an Apache Ossie expression: BIGQUERY, else ANSI_SQL.
+  """Choose the SQL text for an expression: prefer BIGQUERY, else ANSI_SQL.
 
-  Returns None if neither dialect is present (the caller warns and skips). Does
-  not warn about other dialects here -- only the absence of a usable one
+  Returns None when neither dialect is present, leaving the caller to warn and
+  skip. Other dialects are ignored here; only the absence of a usable one
   matters.
   """
   dialects = {
@@ -132,7 +127,7 @@ def pick_expression(ossie_expression, what):
 
 
 def synonyms_of(ai_context):
-  """Extract the synonyms list from an Apache Ossie ai_context (object form only)."""
+  """Return the synonyms list from an ai_context (object form only)."""
   if isinstance(ai_context, dict):
     return list(ai_context.get("synonyms") or [])
   return []
@@ -142,8 +137,7 @@ def description_of(obj):
   """Return a trimmed `description` string for an Apache Ossie object, or None.
 
   A string-form `ai_context` (the schema allows string or object) has no
-  graph-DDL
-  home of its own, so it is folded into the description here.
+  graph-DDL home of its own, so it is folded into the description here.
   """
   parts = []
   desc = obj.get("description")

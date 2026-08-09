@@ -20,9 +20,9 @@
 Apache Ossie metrics reference columns as `<dataset>.<column>`. Detecting and
 stripping those qualifiers must ignore text inside string literals, so a value
 such as 'orders.note' is treated as data, not as a reference to the `orders`
-dataset. A measure binds to exactly one table, so which dataset a
-metric expression references decides where the MEASURE lands -- getting this
-right matters.
+dataset. A measure binds to exactly one table, so which dataset a metric
+expression references decides where the MEASURE lands -- getting this right
+matters.
 """
 
 import re
@@ -34,17 +34,18 @@ _STRING_LITERAL = re.compile(r"'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\"")
 
 
 def _blank_string_literals(expression):
-  """Replace string-literal contents with blanks of equal length, so scanning sees
+  """Blank out string-literal contents, keeping length so offsets don't shift.
 
-  literal-free text without shifting any offsets.
+  Scanning then sees literal-free text at the original character positions.
   """
   return _STRING_LITERAL.sub(lambda m: " " * len(m.group(0)), expression)
 
 
 def _map_outside_string_literals(expression, fn):
-  """Apply `fn` only to the parts of `expression` outside string literals, leaving
+  """Apply `fn` to the parts of `expression` outside string literals.
 
-  each literal verbatim.
+  Each string literal is left verbatim; only the text between literals passes
+  through `fn`.
   """
   out = []
   last = 0
@@ -57,20 +58,20 @@ def _map_outside_string_literals(expression, fn):
 
 
 def _entity_qualifier(name, flags=0):
-  """Regex matching a `<name>.` qualifier, including the BigQuery backtick-quoted
+  """Build a regex matching a `<name>.` qualifier, bare or backtick-quoted.
 
-  form (`` `name`. ``). A negative lookbehind keeps the name from matching
-  inside a
-  larger identifier (e.g. `customer_orders.` when `name` is `orders`), and the
-  optional backticks let it match whether or not the identifier is quoted.
+  A negative lookbehind keeps `name` from matching inside a larger identifier
+  (e.g. `customer_orders.` when `name` is `orders`), and the optional backticks
+  let it match whether or not the identifier is quoted (`` `name`. ``).
   """
   return re.compile(r"(?<![\w`])`?" + re.escape(name) + r"`?\.", flags)
 
 
 def referenced_datasets(expression, dataset_names):
-  """Return the dataset names whose `<name>.` qualifier appears in an expression, in
+  """Return the datasets whose `<name>.` qualifier appears in an expression.
 
-  the order they first appear, ignoring text inside string literals.
+  Names come back in first-appearance order, ignoring text inside string
+  literals.
   """
   scannable = _blank_string_literals(expression)
   hits = []
@@ -83,9 +84,10 @@ def referenced_datasets(expression, dataset_names):
 
 
 def strip_qualifier(expression, dataset):
-  """Remove the `<dataset>.` qualifier (bare or backtick-quoted) so an expression
+  """Remove a `<dataset>.` qualifier so an expression is table-local.
 
-  references table-local columns, without touching text inside string literals.
+  Handles the bare and backtick-quoted forms, and leaves text inside string
+  literals untouched.
   """
   pattern = _entity_qualifier(dataset)
   return _map_outside_string_literals(
@@ -143,12 +145,12 @@ _IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def referenced_columns(expression):
-  """Return the column identifiers referenced in a (table-local) SQL expression,
+  """Return the column identifiers referenced in a table-local SQL expression.
 
-  in first-appearance order. Ignores text inside string literals, function-name
-  identifiers (one immediately followed by `(`), and SQL keywords / type names.
-  A heuristic, not a full parser -- enough to know which columns a MEASURE needs
-  exposed as graph properties.
+  Columns come back in first-appearance order. Ignores text inside string
+  literals, function-name identifiers (one immediately followed by `(`), and SQL
+  keywords / type names. A heuristic, not a full parser -- but enough to know
+  which columns a MEASURE needs exposed as properties.
   """
   scannable = _blank_string_literals(expression)
   out = []
