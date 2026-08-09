@@ -1,0 +1,98 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# A tiny orders graph whose edge carries its own properties. BigQuery graph
+# edge tables can hold PROPERTIES just like node tables, but the core spec has
+# no field slot on a relationship yet, so the edge properties are declared in a
+# `custom_extensions` entry whose JSON payload mirrors the core `fields` shape
+# verbatim -- exactly the form a spec-native `relationships[].fields` would
+# take. The edge properties (order_date, order_total) are columns of the `from`
+# base table that backs the edge, and are deliberately not repeated as node
+# fields on `orders`, so the emitted node and edge PROPERTIES stay distinct.
+
+version: "0.2.0.dev0"
+
+semantic_model:
+  - name: orders_graph
+    description: Orders placed by customers
+
+    datasets:
+      - name: orders
+        source: shop.public.orders
+        primary_key: [order_id]
+        description: Order fact table
+        fields:
+          - name: order_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: order_id
+          - name: customer_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: customer_id
+
+      - name: customer
+        source: shop.public.customer
+        primary_key: [customer_id]
+        description: Customer dimension
+        fields:
+          - name: customer_id
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: customer_id
+          - name: customer_name
+            expression:
+              dialects:
+                - dialect: ANSI_SQL
+                  expression: customer_name
+
+    relationships:
+      - name: placed_by
+        from: orders
+        to: customer
+        from_columns: [customer_id]
+        to_columns: [customer_id]
+        ai_context:
+          synonyms:
+            - ordered by
+        custom_extensions:
+          - vendor_name: COMMON
+            data: |
+              {
+                "fields": [
+                  {
+                    "name": "order_date",
+                    "expression": {
+                      "dialects": [
+                        {"dialect": "ANSI_SQL", "expression": "order_date"}
+                      ]
+                    },
+                    "description": "When the order was placed"
+                  },
+                  {
+                    "name": "order_total",
+                    "expression": {
+                      "dialects": [
+                        {"dialect": "ANSI_SQL", "expression": "order_total"}
+                      ]
+                    }
+                  }
+                ]
+              }

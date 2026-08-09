@@ -51,12 +51,14 @@ re-implemented here.
 See: https://docs.cloud.google.com/bigquery/docs/graph-measures
 """
 
+import json
 import re
 import warnings
 
 from ossie import OSIDocument
 from ossie.models import OSIAIContextObject
 from ossie.models import OSIDialect
+from ossie.models import OSIField
 from pydantic import ValidationError
 import sqlglot
 import sqlglot.expressions as sqlglot_exp
@@ -383,7 +385,9 @@ def _render_edge_table(from_ds, rel):
 
   The edge is backed by the `from` (many) dataset's base table, which holds the
   foreign-key columns. Its SOURCE KEY references the `from` node's primary key
-  and its DESTINATION KEY references the `to` node's join columns.
+  and its DESTINATION KEY references the `to` node's join columns. Any edge
+  properties declared on the relationship (see `_edge_property_fields`) are
+  rendered as a PROPERTIES clause, exactly as a node's fields are.
   """
   from_cols = _require_columns(rel.from_columns, rel.name, "from_columns")
   to_cols = _require_columns(rel.to_columns, rel.name, "to_columns")
@@ -411,7 +415,59 @@ def _render_edge_table(from_ds, rel):
   label = _render_default_label_clause(rel)
   if label:
     lines.append(_indented_line(3, label))
+
+  # Edge properties are columns of the same `from` base table that backs the
+  # edge, so they render through the same field path as node properties (and
+  # strip the `from` dataset's qualifier).
+  properties = []
+  for field in _edge_property_fields(rel):
+    rendered = _render_property_from_field(from_ds.name, field)
+    if rendered is not None:
+      properties.append(rendered)
+  if properties:
+    lines.append(_render_properties_clause(properties))
   return "\n".join(lines)
+
+
+# Well-known key of the custom-extension payload that carries edge properties.
+# Edge properties have no home in the core spec yet, so a relationship declares
+# them in a `custom_extensions` entry whose JSON payload holds a `fields` list
+# of the exact same shape as a dataset's `fields`. This is deliberately the form
+# a future spec-native `relationships[].fields` would take, so promoting it into
+# the core spec later needs no change to already-authored models.
+_EDGE_FIELDS_KEY = "fields"
+
+
+def _edge_property_fields(rel):
+  """Return a relationship's declared edge-property fields as `OSIField`s.
+
+  Reads any `custom_extensions` entry whose JSON payload carries a `fields` list
+  (see `_EDGE_FIELDS_KEY`) and validates each entry with the shared `OSIField`
+  model -- the same validation a node field gets -- so a malformed edge field is
+  reported the same way and both share one rendering path. A relationship with
+  no such extension yields an empty list; a non-JSON payload is ignored with a
+  warning.
+  """
+  fields = []
+  for ext in rel.custom_extensions or []:
+    try:
+      payload = json.loads(ext.data)
+    except (json.JSONDecodeError, TypeError):
+      _warn(
+          rel.name,
+          f"custom extension {ext.vendor_name!r} is not valid JSON; ignored",
+      )
+      continue
+    if not isinstance(payload, dict) or _EDGE_FIELDS_KEY not in payload:
+      continue
+    for raw in payload.get(_EDGE_FIELDS_KEY) or []:
+      try:
+        fields.append(OSIField.model_validate(raw))
+      except ValidationError as e:
+        raise ConversionError(
+            f"relationship '{rel.name}': invalid edge property:\n{e}"
+        ) from e
+  return fields
 
 
 def _require_columns(cols, rel_name, field_name):

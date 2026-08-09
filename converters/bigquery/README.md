@@ -294,6 +294,56 @@ Composite join columns keep their order and are matched positionally:
 dataset with two relationships (junction→A and junction→B); it emits as a node
 with two edges — BigQuery's recommended "promote the junction to a node" shape.
 
+### Edge properties
+
+BigQuery edge tables carry `PROPERTIES` just like node tables — the columns of
+the `from` base table that describe the relationship instance (when an order was
+placed, its total, and so on). The core spec has no field slot on a relationship
+yet, so edge properties are declared in a `custom_extensions` entry whose JSON
+payload holds a `fields` list of the **exact same shape** as a dataset's
+`fields`. This is deliberately the form a future spec-native
+`relationships[].fields` would take, so promoting it into the core spec later
+needs no change to already-authored models.
+
+```yaml
+- name: placed_by
+  from: orders
+  to: customer
+  from_columns: [customer_id]
+  to_columns: [customer_id]
+  custom_extensions:
+    - vendor_name: COMMON
+      data: |
+        {
+          "fields": [
+            {
+              "name": "order_date",
+              "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "order_date"}]},
+              "description": "When the order was placed"
+            },
+            {"name": "order_total",
+             "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "order_total"}]}}
+          ]
+        }
+```
+
+```sql
+    `shop.public.orders` AS placed_by
+      KEY(order_id)
+      SOURCE KEY (order_id) REFERENCES orders (order_id)
+      DESTINATION KEY (customer_id) REFERENCES customer (customer_id)
+      PROPERTIES(
+        order_date OPTIONS(description="When the order was placed"),
+        order_total
+      )
+```
+
+Edge fields render through the same path as node fields — bare column or
+`<expr> AS <name>`, with an optional inline `OPTIONS(description=…)` — and each
+is validated with the same `OSIField` model, so a malformed edge field is
+reported like any other. A relationship with no such extension emits no
+`PROPERTIES` clause; a non-JSON payload is ignored with a warning.
+
 ### Metric → measure
 
 See [Metrics and measures](#metrics-and-measures) below.
@@ -487,6 +537,7 @@ element it concerns in brackets, e.g. `[customer_lifetime_value] metric spans �
 | `does not begin with a supported aggregate` | measure body isn't `SUM/AVG/COUNT/MIN/MAX` | fine if BigQuery accepts it; otherwise rewrite the metric |
 | `no BigQuery-convertible SQL expression` | only a dialect sqlglot can't read (a non-SQL one), or no expression | add a SQL dialect expression (`BIGQUERY` or `ANSI_SQL` is used verbatim; other SQL dialects are transpiled) |
 | `not a plain project.dataset.table identifier` | `source` isn't a base table | point `source` at a table, not a subquery |
+| `custom extension … is not valid JSON` | a relationship's edge-property extension payload isn't JSON | fix the `custom_extensions[].data` JSON, or remove it |
 | `graph has no root node table` / `multiple root node tables` | not exactly one root | adjust relationships so one node has no incoming edge |
 | `multiple semantic models found` | more than one model in the file | split them, or accept only the first being used |
 
@@ -497,7 +548,9 @@ uv sync
 uv run pytest
 ```
 
-The test suite includes a golden-file export (`tests/fixtures/tpcds_ossie.yaml` →
-`tests/fixtures/tpcds_graph.sql`) plus unit tests for measure placement, edge
-keys, root validation, dialect selection and transpilation, and OPTIONS
-(description + synonyms) emission.
+The test suite includes two golden-file exports
+(`tests/fixtures/tpcds_ossie.yaml` → `tests/fixtures/tpcds_graph.sql`, and
+`tests/fixtures/edge_properties_ossie.yaml` →
+`tests/fixtures/edge_properties_graph.sql` for edge properties) plus unit tests
+for measure placement, edge keys and edge properties, root validation, dialect
+selection and transpilation, and OPTIONS (description + synonyms) emission.

@@ -17,6 +17,7 @@
 
 """Tests for the Apache Ossie -> BigQuery property-graph exporter."""
 
+import json
 import pathlib
 import re
 import warnings
@@ -552,6 +553,89 @@ def test_missing_join_columns_raise():
   )
   with pytest.raises(ConversionError, match="from_columns"):
     exporter.convert_ossie_to_bq_graph(ossie)
+
+
+# --- edge properties -------------------------------------------------------
+#
+# BigQuery graph edge tables carry PROPERTIES just like node tables. The core
+# spec has no field slot on a relationship yet, so edge properties are declared
+# in a `custom_extensions` entry whose JSON payload mirrors the core `fields`
+# shape verbatim (the form a spec-native `relationships[].fields` would take).
+
+
+def _edge_fields_ext(fields):
+  """A relationship `custom_extensions` block carrying edge-property fields."""
+  return {
+      "custom_extensions": [
+          {"vendor_name": "COMMON", "data": json.dumps({"fields": fields})}
+      ]
+  }
+
+
+def test_edge_properties_export_matches_golden():
+  out = _convert(load_fixture("edge_properties_ossie.yaml"))
+  assert out == load_fixture("edge_properties_graph.sql")
+
+
+def test_edge_properties_export_is_warning_free():
+  assert _warnings_for(load_fixture("edge_properties_ossie.yaml")) == []
+
+
+def test_relationship_without_edge_fields_emits_no_properties():
+  # A plain FK edge (no declared edge fields) gets no PROPERTIES clause.
+  assert "PROPERTIES" not in _convert(_two_ds())
+
+
+def test_edge_field_renders_as_edge_property():
+  out = _convert(_two_ds(rel_extra=_edge_fields_ext([_field("quantity")])))
+  # The bare column appears as an edge property under the edge table.
+  assert "AS o_to_c" in out
+  assert re.search(r"^\s+quantity\s*$", out, re.MULTILINE)
+
+
+def test_computed_edge_field_uses_expr_as_name():
+  out = _convert(
+      _two_ds(rel_extra=_edge_fields_ext([_field("total", "price * qty")]))
+  )
+  assert "price * qty AS total" in out
+
+
+def test_edge_field_qualifier_stripped_to_backing_table_local():
+  # An edge field qualified by the `from` dataset renders table-local, matching
+  # how node fields and measures drop their owning qualifier.
+  out = _convert(
+      _two_ds(rel_extra=_edge_fields_ext([_field("amt", "orders.amount")]))
+  )
+  assert "amount AS amt" in out
+  assert "orders.amount" not in out
+
+
+def test_edge_field_description_emitted_as_options():
+  out = _convert(
+      _two_ds(
+          rel_extra=_edge_fields_ext(
+              [_field("quantity", description="Units purchased")]
+          )
+      )
+  )
+  assert 'quantity OPTIONS(description="Units purchased")' in out
+
+
+def test_invalid_edge_field_raises_clean_error():
+  # An edge field missing its required `expression` fails the shared OSIField
+  # validation and surfaces as a ConversionError, not a traceback.
+  ossie = _two_ds(rel_extra=_edge_fields_ext([{"name": "bad"}]))
+  with pytest.raises(ConversionError, match="invalid edge property"):
+    exporter.convert_ossie_to_bq_graph(ossie)
+
+
+def test_non_json_edge_extension_is_ignored_with_warning():
+  rel_extra = {
+      "custom_extensions": [{"vendor_name": "COMMON", "data": "not json{"}]
+  }
+  ossie = _two_ds(rel_extra=rel_extra)
+  assert "PROPERTIES" not in _convert(ossie)
+  assert any("not valid JSON" in m for m in _warnings_for(ossie))
 
 
 # --- root-node validation --------------------------------------------------
