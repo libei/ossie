@@ -28,8 +28,7 @@ drop information emit warnings to stderr. This converter is export-only.
 import argparse
 import sys
 
-from ._common import ConversionError
-from .ossie_to_bq_graph import convert_ossie_to_bq_graph
+from .converter import ConversionError, convert_ossie_to_bq_graph
 
 
 def _build_parser():

@@ -22,7 +22,7 @@ import warnings
 
 from _util import load_fixture, sql_body
 from ossie_bigquery import ConversionError
-from ossie_bigquery import ossie_to_bq_graph as exporter
+from ossie_bigquery import converter as exporter
 import pytest
 import yaml
 

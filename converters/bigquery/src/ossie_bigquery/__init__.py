@@ -17,8 +17,7 @@
 
 """Apache Ossie -> BigQuery Graph converter (export-only)."""
 
-from ._common import ConversionError
-from .ossie_to_bq_graph import convert_ossie_to_bq_graph
+from .converter import ConversionError, convert_ossie_to_bq_graph
 
 __all__ = [
     "ConversionError",

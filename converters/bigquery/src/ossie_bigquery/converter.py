@@ -39,18 +39,34 @@ See: https://docs.cloud.google.com/bigquery/docs/graph-measures
 import re
 import warnings
 
-from ._common import (
-    ConversionError,
-    OSSIE_VERSION,
-    SUPPORTED_AGGREGATES,
-    description_of,
-    load_yaml,
-    pick_expression,
-    require,
-    require_str,
-    synonyms_of,
+import yaml
+
+from .sql_expressions import (
+    referenced_columns,
+    referenced_datasets,
+    strip_qualifier,
 )
-from ._expr import referenced_columns, referenced_datasets, strip_qualifier
+
+# Apache Ossie spec version this converter targets (see core-spec/).
+#
+# NOTE: this is an exact-match check. Like the databricks spoke, this converter
+# intentionally has no `apache-ossie` package dependency, so nothing updates it
+# automatically -- it MUST be bumped in lockstep with the `version` in
+# `core-spec/` whenever the spec version moves.
+OSSIE_VERSION = "0.2.0.dev0"
+
+# Expression dialects this converter understands, in preference order.
+DIALECT_BIGQUERY = "BIGQUERY"
+DIALECT_ANSI = "ANSI_SQL"
+
+# Aggregate functions BigQuery accepts inside MEASURE(...). See
+# https://docs.cloud.google.com/bigquery/docs/graph-measures
+SUPPORTED_AGGREGATES = ("SUM", "AVG", "COUNT", "MIN", "MAX")
+
+
+class ConversionError(Exception):
+  """Raised when an input cannot be converted."""
+
 
 # All generated indentation flows through this single mechanism: one nesting
 # level == one INDENT. Keeping every indent derived from `depth` (rather than
@@ -446,3 +462,95 @@ def _describe(description, synonyms):
 def _options_clause(description, synonyms):
   text = _describe(description, synonyms)
   return f"OPTIONS(description={_quote(text)})" if text else None
+
+
+# --- Apache Ossie input: loading, validation, and schema accessors ----------
+#
+# Small leaf helpers for turning raw YAML into validated values. Kept together
+# at the bottom so the top of the file stays focused on the DDL it emits.
+
+
+def load_yaml(text):
+  """Parse YAML text, surfacing a syntax error as a ConversionError.
+
+  Callers (and the CLI) then get a clean message rather than a raw traceback.
+  Plain SafeLoader is fine here: the output is SQL text, not YAML, so there is
+  no `on:`-key round-trip hazard to guard against.
+  """
+  try:
+    return yaml.safe_load(text)
+  except yaml.YAMLError as e:
+    raise ConversionError(f"Invalid YAML: {e}") from e
+
+
+def require(obj, key, what):
+  """Return `obj[key]`, or raise ConversionError if it is missing or empty.
+
+  Malformed input then surfaces as a readable message rather than a raw
+  KeyError. Presence is tested by key, not truthiness, so a legitimately falsy
+  value such as `0` or `False` is returned; a missing key, a null, or an
+  empty/whitespace string is rejected.
+  """
+  if not isinstance(obj, dict) or key not in obj or obj[key] is None:
+    raise ConversionError(f"{what} is missing required '{key}'")
+  value = obj[key]
+  if isinstance(value, str) and not value.strip():
+    raise ConversionError(f"{what} has an empty '{key}'")
+  return value
+
+
+def require_str(obj, key, what):
+  """Like `require`, but also require the value to be a string.
+
+  A non-string scalar (e.g. a YAML number used where a name or expression is
+  expected) raises a clean ConversionError instead of crashing later in a
+  string operation.
+  """
+  value = require(obj, key, what)
+  if not isinstance(value, str):
+    raise ConversionError(
+        f"{what}: '{key}' must be a string, got {type(value).__name__}"
+    )
+  return value
+
+
+def pick_expression(ossie_expression, what):
+  """Choose the SQL text for an expression: prefer BIGQUERY, else ANSI_SQL.
+
+  Returns None when neither dialect is present, leaving the caller to warn and
+  skip. Other dialects are ignored here; only the absence of a usable one
+  matters.
+  """
+  dialects = {
+      d.get("dialect"): d.get("expression")
+      for d in (ossie_expression or {}).get("dialects") or []
+  }
+  expr = dialects.get(DIALECT_BIGQUERY) or dialects.get(DIALECT_ANSI)
+  if expr is not None and not isinstance(expr, str):
+    raise ConversionError(
+        f"{what}: expression must be a string, got {type(expr).__name__}"
+    )
+  return expr
+
+
+def synonyms_of(ai_context):
+  """Return the synonyms list from an ai_context (object form only)."""
+  if isinstance(ai_context, dict):
+    return list(ai_context.get("synonyms") or [])
+  return []
+
+
+def description_of(obj):
+  """Return a trimmed `description` string for an Apache Ossie object, or None.
+
+  A string-form `ai_context` (the schema allows string or object) has no
+  graph-DDL home of its own, so it is folded into the description here.
+  """
+  parts = []
+  desc = obj.get("description")
+  if isinstance(desc, str) and desc.strip():
+    parts.append(desc.strip())
+  ai = obj.get("ai_context")
+  if isinstance(ai, str) and ai.strip():
+    parts.append(ai.strip())
+  return "\n".join(parts) if parts else None
