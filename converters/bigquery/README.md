@@ -21,7 +21,7 @@
 
 Convert an [Apache Ossie](https://github.com/apache/ossie) semantic model into a
 [BigQuery Graph](https://docs.cloud.google.com/bigquery/docs/graph-measures)
-(with graph measures).
+(with measures).
 
 The converter is an **offline text transform**: an Ossie model (YAML) goes in, a
 single `CREATE OR REPLACE PROPERTY GRAPH` statement (SQL) comes out. It never

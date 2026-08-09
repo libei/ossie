@@ -20,7 +20,7 @@
 Apache Ossie metrics reference columns as `<dataset>.<column>`. Detecting and
 stripping those qualifiers must ignore text inside string literals, so a value
 such as 'orders.note' is treated as data, not as a reference to the `orders`
-dataset. A BigQuery Graph measure binds to exactly one table, so which dataset a
+dataset. A measure binds to exactly one table, so which dataset a
 metric expression references decides where the MEASURE lands -- getting this
 right matters.
 """

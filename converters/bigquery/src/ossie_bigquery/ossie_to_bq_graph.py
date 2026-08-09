@@ -27,7 +27,7 @@ properties:
   * each single-table `metric` -> a `MEASURE(<agg>) AS <name>` on its owning
   node
 
-A BigQuery Graph measure binds an aggregate to exactly one table's KEY; the
+A measure binds an aggregate to exactly one table's KEY; the
 cross-table rollup happens at query time via `GRAPH_EXPAND(...) + AGG(...)`. A
 metric whose aggregate genuinely spans multiple datasets cannot be expressed as
 one MEASURE and is skipped with a warning. The converter is a text transform; it
@@ -247,7 +247,7 @@ def _render_node_table(name, ds, measures):
     properties.append(rendered)
     exposed.add(field["name"])
 
-  # A BigQuery Graph MEASURE can only aggregate columns that are exposed as
+  # A MEASURE can only aggregate columns that are exposed as
   # properties. Expose any column a measure references that no field already
   # declares, so e.g. MEASURE(SUM(credit_limit)) works even when credit_limit
   # is not itself listed as a dimension field.
