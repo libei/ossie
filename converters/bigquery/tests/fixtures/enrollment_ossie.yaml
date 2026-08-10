@@ -15,23 +15,28 @@
 # specific language governing permissions and limitations
 # under the License.
 
-# A many-to-many graph, expressed with a first-class edge. A student can enroll
-# in many courses and a course can hold many students; a foreign key cannot say
-# that, so the link lives in its own table, `enrollment` (one row per (student,
-# course) pair). In BigQuery an EDGE TABLE is structurally a NODE TABLE plus two
-# endpoints: it has its own backing table, KEY, and PROPERTIES, then a SOURCE KEY
-# and a DESTINATION KEY that each REFERENCE a node. So the edge is modeled here
-# exactly like a dataset -- it has a `source`, a `primary_key`, and `fields` --
-# plus a `source_key`/`destination_key` saying where it connects.
+# A many-to-many graph. A student can enroll in many courses and a course can
+# hold many students; a foreign key cannot say that, so the link lives in its
+# own through-table, `enrollment` (one row per (student, course) pair).
 #
-# The core spec has no first-class edge slot yet, so the `edges` list rides in a
-# model-level Google-owned `custom_extensions` entry, shaped as a future
-# spec-native `edges:` (a sibling of `datasets:`) would be. Each endpoint reads
-# left to right as its DDL clause: `columns` are the edge's own key columns, and
-# they REFERENCE `node` (`references`). `references` defaults to that node's
-# primary_key and is spelled out here only to be explicit; the junction's own
-# columns (`s_id`, `c_id`) are deliberately named differently from the nodes'
-# keys to show that the two are distinct.
+# Every edge is a `relationship`, whatever its cardinality, so the many-to-many
+# edge lives in the `relationships:` block alongside any one-to-many edge. The
+# native relationship fields name the two node endpoints -- `from`/`to` are the
+# nodes, and `from_columns`/`to_columns` are the columns referenced ON those
+# nodes. The one thing the core spec cannot express yet -- the through-table --
+# rides in a Google-owned `relationship` custom extension: its `source` (the
+# through-table), `primary_key`, and the `source_key`/`destination_key` columns
+# in that table that join to the `from`/`to` node. `from` renders as BigQuery's
+# SOURCE and `to` as its DESTINATION. The through-table appears only as
+# `source`; it is never a dataset, because in BigQuery Graph a dataset is an
+# entity (a node), not a relationship. The junction's own columns (`s_id`,
+# `c_id`) are deliberately named differently from the nodes' keys to show that
+# the two are distinct.
+#
+# Descriptions and AI context are set on every object that supports them, as the
+# Apache Ossie examples do. A relationship has no `description` field (only
+# nodes, fields, and metrics do), so its human description rides in
+# `ai_context.instructions`.
 
 version: "0.2.0.dev0"
 
@@ -59,6 +64,9 @@ semantic_model:
                 - dialect: BIGQUERY
                   expression: student_id
             description: Unique identifier for the student
+            ai_context:
+              synonyms:
+                - student number
           - name: student_name
             expression:
               dialects:
@@ -84,59 +92,63 @@ semantic_model:
                 - dialect: BIGQUERY
                   expression: course_id
             description: Unique identifier for the course
+            ai_context:
+              synonyms:
+                - course number
           - name: title
             expression:
               dialects:
                 - dialect: BIGQUERY
                   expression: title
             description: Course title
+            ai_context:
+              synonyms:
+                - course name
 
-    # The many-to-many edge, modeled like a dataset (its own source, key, and
-    # fields) plus two endpoints. Carried in a model-level Google extension until
-    # the core spec grows a first-class `edges:` list.
-    custom_extensions:
-      - vendor_name: GOOGLE
-        data: |
-          {
-            "edges": [
+    relationships:
+      # The many-to-many edge. Native fields name the two node endpoints; the
+      # GOOGLE `relationship` extension supplies the through-table the current
+      # spec cannot express yet.
+      - name: enrolled_in
+        from: student
+        from_columns: [student_id]      # REFERENCES student (student_id)
+        to: course
+        to_columns: [course_id]         # REFERENCES course (course_id)
+        ai_context:
+          instructions: A student's enrollment in a course
+          synonyms:
+            - takes
+            - registered for
+        custom_extensions:
+          - vendor_name: GOOGLE
+            data: |
               {
-                "name": "enrolled_in",
-                "source": "campus.public.enrollment",
-                "primary_key": ["s_id", "c_id"],
-                "description": "A student's enrollment in a course",
-                "ai_context": {"synonyms": ["takes", "registered for"]},
-                "source_key": {
-                  "columns": ["s_id"],
-                  "node": "student",
-                  "references": ["student_id"]
-                },
-                "destination_key": {
-                  "columns": ["c_id"],
-                  "node": "course",
-                  "references": ["course_id"]
-                },
-                "fields": [
-                  {
-                    "name": "grade",
-                    "expression": {
-                      "dialects": [
-                        {"dialect": "BIGQUERY", "expression": "grade"}
-                      ]
+                "relationship": {
+                  "source": "campus.public.enrollment",
+                  "primary_key": ["s_id", "c_id"],
+                  "source_key": ["s_id"],
+                  "destination_key": ["c_id"],
+                  "fields": [
+                    {
+                      "name": "grade",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "grade"}
+                        ]
+                      },
+                      "description": "Final grade the student earned",
+                      "ai_context": {"synonyms": ["mark", "score"]}
                     },
-                    "description": "Final grade the student earned",
-                    "ai_context": {"synonyms": ["mark", "score"]}
-                  },
-                  {
-                    "name": "enrolled_on",
-                    "expression": {
-                      "dialects": [
-                        {"dialect": "BIGQUERY", "expression": "enrolled_on"}
-                      ]
-                    },
-                    "description": "Date the student enrolled in the course",
-                    "ai_context": {"synonyms": ["enrollment date"]}
-                  }
-                ]
+                    {
+                      "name": "enrolled_on",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "enrolled_on"}
+                        ]
+                      },
+                      "description": "Date the student enrolled in the course",
+                      "ai_context": {"synonyms": ["enrollment date"]}
+                    }
+                  ]
+                }
               }
-            ]
-          }

@@ -4,15 +4,15 @@ CREATE OR REPLACE PROPERTY GRAPH enrollment_graph
       KEY(student_id)
       DEFAULT LABEL OPTIONS(description="A person enrolled at the school", synonyms=["students", "learners"])
       PROPERTIES(
-        student_id OPTIONS(description="Unique identifier for the student"),
+        student_id OPTIONS(description="Unique identifier for the student", synonyms=["student number"]),
         student_name OPTIONS(description="Student full name", synonyms=["name"])
       ),
     `campus.public.course` AS course
       KEY(course_id)
       DEFAULT LABEL OPTIONS(description="A course students can enroll in", synonyms=["courses", "classes"])
       PROPERTIES(
-        course_id OPTIONS(description="Unique identifier for the course"),
-        title OPTIONS(description="Course title")
+        course_id OPTIONS(description="Unique identifier for the course", synonyms=["course number"]),
+        title OPTIONS(description="Course title", synonyms=["course name"])
       )
   )
   EDGE TABLES (

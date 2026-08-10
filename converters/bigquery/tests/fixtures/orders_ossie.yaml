@@ -23,12 +23,13 @@
 #
 # BigQuery edge tables can hold PROPERTIES just like node tables, but the core
 # spec has no field slot on a relationship yet, so the edge properties are
-# declared in a `custom_extensions` entry whose JSON payload mirrors the core
-# `fields` shape verbatim -- exactly the form a spec-native
-# `relationships[].fields` would take, per-field description and ai_context and
-# all. The edge properties (order_date, order_total) are columns of the `from`
-# base table that backs the edge, and are deliberately not repeated as node
-# fields on `orders`, so the emitted node and edge PROPERTIES stay distinct.
+# declared under a Google-owned `relationship` custom extension whose `fields`
+# list mirrors the core `fields` shape verbatim -- exactly the form a
+# spec-native `relationships[].fields` would take, per-field description and
+# ai_context and all. The edge properties (order_date, order_total) are columns
+# of the `from` base table that backs the edge, and are deliberately not repeated
+# as node fields on `orders`, so the emitted node and edge PROPERTIES stay
+# distinct.
 
 version: "0.2.0.dev0"
 
@@ -111,26 +112,28 @@ semantic_model:
           - vendor_name: GOOGLE
             data: |
               {
-                "fields": [
-                  {
-                    "name": "order_date",
-                    "expression": {
-                      "dialects": [
-                        {"dialect": "BIGQUERY", "expression": "order_date"}
-                      ]
+                "relationship": {
+                  "fields": [
+                    {
+                      "name": "order_date",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "order_date"}
+                        ]
+                      },
+                      "description": "When the order was placed",
+                      "ai_context": {"synonyms": ["purchase date", "ordered on"]}
                     },
-                    "description": "When the order was placed",
-                    "ai_context": {"synonyms": ["purchase date", "ordered on"]}
-                  },
-                  {
-                    "name": "order_total",
-                    "expression": {
-                      "dialects": [
-                        {"dialect": "BIGQUERY", "expression": "order_total"}
-                      ]
-                    },
-                    "description": "Total amount of the order",
-                    "ai_context": {"synonyms": ["order amount", "basket value"]}
-                  }
-                ]
+                    {
+                      "name": "order_total",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "order_total"}
+                        ]
+                      },
+                      "description": "Total amount of the order",
+                      "ai_context": {"synonyms": ["order amount", "basket value"]}
+                    }
+                  ]
+                }
               }

@@ -291,7 +291,7 @@ Composite join columns keep their order and are matched positionally:
 `from_columns: [a, b]` with `to_columns: [x, y]` pairs `a→x`, `b→y`.
 
 A plain foreign-key edge is **many-to-one**: each `from` row links to at most one
-`to` row. For a **many-to-many** link, back the edge with a junction table — see
+`to` row. For a **many-to-many** link, back the edge with a through-table — see
 [Many-to-many edges](#many-to-many-edges).
 
 ### Edge properties
@@ -301,11 +301,11 @@ the `from` base table that describe the relationship instance (when an order was
 placed, its total, and so on). The core spec has no field slot on a relationship
 yet, so edge properties are declared in a `custom_extensions` entry — owned by
 the `GOOGLE` vendor, since this is a BigQuery-specific convention until the core
-spec gains one — whose JSON payload holds a `fields` list of the **exact same
-shape** as a dataset's `fields`. This is deliberately the form a future
-spec-native `relationships[].fields` would take, so promoting it into the core
-spec later needs no change to already-authored models. Extensions owned by any
-other vendor are ignored.
+spec gains one — whose JSON payload holds a `relationship` object with a `fields`
+list of the **exact same shape** as a dataset's `fields`. This is deliberately
+the form a future spec-native `relationships[].fields` would take, so promoting
+it into the core spec later needs no change to already-authored models.
+Extensions owned by any other vendor are ignored.
 
 ```yaml
 - name: placed_by
@@ -317,15 +317,17 @@ other vendor are ignored.
     - vendor_name: GOOGLE
       data: |
         {
-          "fields": [
-            {
-              "name": "order_date",
-              "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "order_date"}]},
-              "description": "When the order was placed"
-            },
-            {"name": "order_total",
-             "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "order_total"}]}}
-          ]
+          "relationship": {
+            "fields": [
+              {
+                "name": "order_date",
+                "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "order_date"}]},
+                "description": "When the order was placed"
+              },
+              {"name": "order_total",
+               "expression": {"dialects": [{"dialect": "ANSI_SQL", "expression": "order_total"}]}}
+            ]
+          }
         }
 ```
 
@@ -348,26 +350,24 @@ reported like any other. A relationship with no such extension emits no
 
 ### Many-to-many edges
 
-A `relationship` is convenient shorthand for a **many-to-one** foreign-key edge:
-each `from` row links to at most one `to` row, and the edge is backed by the
-`from` table. A **many-to-many** link — a student takes many courses, and a
-course holds many students — has no foreign key to hang off; it lives in its own
-**junction table** with one row per pair.
+Every edge is a `relationship`, whatever its cardinality — so a **many-to-many**
+link lives in the same `relationships:` block as any many-to-one edge. A plain
+relationship is a many-to-one foreign-key edge backed by the `from` table. A
+many-to-many link — a student takes many courses, and a course holds many
+students — has no foreign key to hang off; it lives in its own **through-table**
+with one row per pair.
 
-In BigQuery an `EDGE TABLE` is structurally a `NODE TABLE` **plus two
-endpoints** — it has its own backing table, `KEY`, and `PROPERTIES`, then a
-`SOURCE KEY` and a `DESTINATION KEY` that each `REFERENCES` a node. Nodes and
-edges are symmetric first-class citizens. So rather than bolt a junction onto a
-relationship, model the edge itself as a first-class object shaped like a
-dataset: its own `source`, `primary_key`, and `fields`, plus a
-`source_key`/`destination_key` endpoint naming where it connects.
-
-The core spec has no first-class edge slot yet, so the `edges` list rides in a
-**model-level** `GOOGLE`-owned `custom_extensions` entry, shaped as a future
-spec-native `edges:` (a sibling of `datasets:`) would be — so promoting it into
-the core spec later needs no change to already-authored models. Each endpoint
-reads left to right as its DDL clause: `columns` are the edge's own key columns,
-which `REFERENCES` `node` (`references`).
+The native relationship fields still name the two node endpoints: `from`/`to`
+are the nodes, and `from_columns`/`to_columns` are the columns referenced **on**
+those nodes. The one thing the core spec can't express yet — the through-table —
+rides in a `GOOGLE`-owned `custom_extensions` entry on that relationship, whose
+JSON payload holds a `relationship` object. It is named `relationship` (not
+`edge`) because what it augments **is** a relationship, and it is deliberately
+the shape a future spec-native addition to `relationships[]` would take, so
+promoting it into the core spec later needs no change to already-authored
+models. The through-table appears only as `source`; it is **never** a
+`dataset`, because in BigQuery Graph a dataset is an entity (a node), not a
+relationship.
 
 ```yaml
 semantic_model:
@@ -375,28 +375,29 @@ semantic_model:
     datasets:
       - {name: student, source: campus.public.student, primary_key: [student_id], ...}
       - {name: course,  source: campus.public.course,  primary_key: [course_id], ...}
-    custom_extensions:
-      - vendor_name: GOOGLE
-        data: |
-          {
-            "edges": [
+    relationships:
+      - name: enrolled_in
+        from: student
+        from_columns: [student_id]      # REFERENCES student (student_id)
+        to: course
+        to_columns: [course_id]         # REFERENCES course (course_id)
+        ai_context:
+          instructions: A student's enrollment in a course
+        custom_extensions:
+          - vendor_name: GOOGLE
+            data: |
               {
-                "name": "enrolled_in",
-                "source": "campus.public.enrollment",
-                "primary_key": ["s_id", "c_id"],
-                "source_key": {
-                  "columns": ["s_id"], "node": "student", "references": ["student_id"]
-                },
-                "destination_key": {
-                  "columns": ["c_id"], "node": "course", "references": ["course_id"]
-                },
-                "fields": [
-                  {"name": "grade",
-                   "expression": {"dialects": [{"dialect": "BIGQUERY", "expression": "grade"}]}}
-                ]
+                "relationship": {
+                  "source": "campus.public.enrollment",
+                  "primary_key": ["s_id", "c_id"],
+                  "source_key": ["s_id"],
+                  "destination_key": ["c_id"],
+                  "fields": [
+                    {"name": "grade",
+                     "expression": {"dialects": [{"dialect": "BIGQUERY", "expression": "grade"}]}}
+                  ]
+                }
               }
-            ]
-          }
 ```
 
 ```sql
@@ -404,28 +405,38 @@ semantic_model:
       KEY(s_id, c_id)
       SOURCE KEY (s_id) REFERENCES student (student_id)
       DESTINATION KEY (c_id) REFERENCES course (course_id)
+      DEFAULT LABEL OPTIONS(description="A student's enrollment in a course")
       PROPERTIES(
         grade
       )
 ```
 
-- `source` is the table that backs the edge (a `project.dataset.table`; the
-  converter references it, it does not create it). For a junction, this is the
-  link table; the junction's own key columns (`s_id`, `c_id`) are named here so
-  they need not match the nodes' keys.
-- `source_key`/`destination_key` are the two endpoints. Each is `{columns,
-  node, references}`: `columns` are the edge's own key columns and become the
-  `SOURCE`/`DESTINATION KEY`; they `REFERENCES` `node`'s `references` columns.
-  `references` is **optional** and defaults to that node's `primary_key`.
-- `primary_key` (the edge `KEY`) is optional; it defaults to the two endpoints'
-  `columns` combined, with duplicates removed.
-- `fields` are edge properties — columns of the edge's own `source` table that
-  describe the link (a grade, an enrolment date) — rendered exactly as a node's
-  fields and validated with the same `OSIField` model.
-- A structurally invalid edge (missing `name`/`source`, an unknown `node`, a
-  malformed endpoint, or a `columns`/`references` arity mismatch) raises a
-  `ConversionError`; an edge whose endpoint node has no `primary_key` is dropped
-  with a warning, as a dangling foreign-key edge is.
+The presence of `source` is what marks a relationship as many-to-many. Each side
+reads straight down in BigQuery's own vocabulary, under the fixed rule **`from` =
+source, `to` = destination**:
+
+| BigQuery `EDGE TABLE` clause | comes from |
+| --- | --- |
+| `SOURCE KEY (s_id) REFERENCES student (student_id)` | `source_key` + native `from` / `from_columns` |
+| `DESTINATION KEY (c_id) REFERENCES course (course_id)` | `destination_key` + native `to` / `to_columns` |
+
+- `source` is the through-table that backs the edge (a `project.dataset.table`;
+  the converter references it, it does not create it). Its own key columns
+  (`s_id`, `c_id`) are named here so they need not match the nodes' keys.
+- `source_key`/`destination_key` are that table's columns joining to the `from`
+  / `to` node. They become the `SOURCE`/`DESTINATION KEY`, and each must have the
+  same number of columns as the native `from_columns`/`to_columns` it references.
+- `primary_key` (the edge `KEY`) is optional; it defaults to `source_key` and
+  `destination_key` combined, with duplicates removed.
+- `fields` are edge properties — columns of the through-table that describe the
+  link (a grade, an enrolment date) — rendered exactly as a node's fields and
+  validated with the same `OSIField` model.
+- A relationship has no `description` field of its own, so its human description
+  is authored as `ai_context.instructions` and rendered on the edge's label.
+- A structurally invalid many-to-many relationship (a missing/malformed
+  `source`, a non-list `source_key`/`destination_key`, or a join-column arity
+  mismatch) raises a `ConversionError`; an edge whose endpoint node has no
+  `primary_key` is dropped with a warning, as a dangling foreign-key edge is.
 
 **Consume a many-to-many edge with `MATCH`, not `GRAPH_EXPAND`.** `GRAPH_EXPAND`
 flattens a foreign-key hierarchy and only walks many-to-one / one-to-one edges;
@@ -654,7 +665,7 @@ The test suite includes three golden-file exports —
 `tests/fixtures/tpcds_ossie.yaml` → `tests/fixtures/tpcds_graph.sql`,
 `tests/fixtures/orders_ossie.yaml` → `tests/fixtures/orders_graph.sql` (edge
 properties), and `tests/fixtures/enrollment_ossie.yaml` →
-`tests/fixtures/enrollment_graph.sql` (a many-to-many first-class edge) — plus
-unit tests for measure placement, edge keys and edge properties, first-class
-many-to-many edges, root validation, dialect selection and transpilation, and
+`tests/fixtures/enrollment_graph.sql` (a many-to-many relationship) — plus
+unit tests for measure placement, edge keys and edge properties, many-to-many
+relationships, root validation, dialect selection and transpilation, and
 OPTIONS (description + synonyms) emission.

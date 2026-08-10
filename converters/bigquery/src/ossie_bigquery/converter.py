@@ -23,14 +23,15 @@ properties:
 
   * each `dataset`      -> a NODE TABLE (`KEY` + `PROPERTIES`)
   * each `relationship` -> an EDGE TABLE (`SOURCE KEY ... REFERENCES` /
-                           `DESTINATION KEY ... REFERENCES`), sugar for a
-                           many-to-one foreign-key edge backed by the `from`
-                           table
-  * each first-class `edge` -> an EDGE TABLE modeled like a dataset (its own
-                           `source`, `primary_key`, `fields`, plus a
-                           `source_key`/`destination_key` endpoint); this is how
-                           many-to-many edges (backed by a junction table) are
-                           expressed
+                           `DESTINATION KEY ... REFERENCES`). A plain
+                           relationship is a many-to-one foreign-key edge backed
+                           by the `from` table. A many-to-many relationship --
+                           backed by its own through-table -- carries that extra
+                           detail (the through-table `source`, its key, and the
+                           `source_key`/`destination_key` join columns) in a
+                           Google-owned `relationship` custom extension, since
+                           the core spec cannot express it yet (see
+                           `_relationship_extension`).
   * each single-table `metric` -> a `MEASURE(<agg>) AS <name>` on its owning
     node
 
@@ -221,10 +222,12 @@ def _render_property_graph(model):
       for name in node_names
   ]
 
-  # Edges come from two sources, normalized to one internal shape and rendered
-  # by one path: the core-spec `relationships` (sugar for a many-to-one FK edge
-  # backed by the `from` table) and first-class `edges` (an edge modeled like a
-  # dataset; see `_first_class_edges`). Relationships render first, then edges.
+  # Every edge is a `relationship`, whatever its cardinality. A plain
+  # relationship is a many-to-one foreign-key edge; a many-to-many relationship
+  # additionally carries its through-table in a Google-owned extension. Both
+  # normalize to one internal shape (see `_normalize_edge`) and render by one
+  # path. `from`/`to` name the two node endpoints in either case, so the
+  # unknown- and skipped-dataset checks below apply uniformly.
   edges = []
   for rel in model.relationships or []:
     frm, to = rel.from_dataset, rel.to
@@ -241,11 +244,7 @@ def _render_property_graph(model):
           " edge omitted",
       )
       continue
-    edges.append(_normalize_relationship_edge(rel, datasets))
-  for raw in _first_class_edges(model):
-    edge = _normalize_first_class_edge(raw, model, datasets, skipped)
-    if edge is not None:
-      edges.append(edge)
+    edges.append(_normalize_edge(rel, datasets))
 
   edge_tables = [_render_edge(edge) for edge in edges]
 
@@ -412,10 +411,9 @@ def _render_property_from_field(dataset, field):
 def _render_edge(edge):
   """Render one normalized edge as an EDGE TABLE entry.
 
-  `edge` is the internal shape produced by `_normalize_relationship_edge` (a
-  core-spec relationship) or `_normalize_first_class_edge` (a first-class edge);
-  both render identically here. An EDGE TABLE is a NODE TABLE plus two
-  endpoints:
+  `edge` is the internal shape produced by `_normalize_edge` for either a
+  many-to-one or a many-to-many relationship; both render identically here. An
+  EDGE TABLE is a NODE TABLE plus two endpoints:
   `<backing> AS <name>`, a `KEY`, a `SOURCE KEY (...) REFERENCES <node> (...)`,
   a
   matching `DESTINATION KEY`, an optional label, and a PROPERTIES clause built
@@ -452,21 +450,112 @@ def _render_edge(edge):
   return "\n".join(lines)
 
 
-def _normalize_relationship_edge(rel, datasets):
-  """Normalize a core-spec `relationship` into the internal edge shape.
+# Vendor tag of the custom-extension entry that carries BigQuery-specific
+# relationship detail. This is BigQuery's converter, so the extension is owned
+# by Google rather than the vendor-neutral COMMON namespace -- claiming COMMON
+# for a convention that is not yet standardized would overclaim. Detail is read
+# only from this vendor's extension; extensions owned by any other vendor are
+# left untouched.
+_REL_EXT_VENDOR = "GOOGLE"
 
-  A relationship is sugar for a many-to-one foreign-key edge: it is backed by
-  the `from` (many-side) table, which holds the FK columns. That table is its
-  own
-  source node, so its primary key is both the edge KEY and the SOURCE KEY
-  (referencing itself), and the DESTINATION KEY is `from_columns` referencing
-  the
-  `to` node's `to_columns`. Edge properties, if any, ride in the relationship's
-  Google-owned extension (see `_edge_property_fields`).
+# Key, inside that extension's JSON payload, of the object holding the extra
+# relationship detail the core spec cannot express yet. It is named
+# `relationship` (not `edge`/`junction`) because what it augments is a
+# relationship -- the same block whatever the cardinality -- and it is
+# deliberately the shape a future spec-native addition to `relationships[]`
+# would take, so promoting it into the core spec later needs no change to
+# already-authored models. It may carry:
+#   * `fields`       -- edge properties (any relationship);
+#   * `source`       -- the through-table backing a many-to-many edge;
+#   * `primary_key`  -- that through-table's KEY (optional);
+#   * `source_key` / -- the through-table columns joining to the `from` / `to`
+#     `destination_key`  node (a many-to-many edge).
+# The presence of `source` is what marks a relationship as many-to-many.
+_REL_EXT_KEY = "relationship"
+
+# Key, inside the `relationship` object, of the `fields` list holding edge
+# properties. Edge properties have no home in the core spec yet, so the payload
+# holds a `fields` list of the exact same shape as a dataset's `fields`.
+_EDGE_FIELDS_KEY = "fields"
+
+
+def _relationship_extension(rel):
+  """Return the merged Google-owned `relationship` extension payload, or {}.
+
+  Reads every Google-owned custom-extension entry (see `_REL_EXT_VENDOR`) on the
+  relationship whose JSON payload carries a `relationship` object (see
+  `_REL_EXT_KEY`) and merges them into one dict for the caller to interpret.
+  Extensions owned by other vendors, and payloads without a `relationship` key,
+  are ignored; a non-JSON payload on this vendor's extension is skipped with a
+  warning, and a non-mapping `relationship` raises.
+  """
+  merged = {}
+  for ext in rel.custom_extensions or []:
+    if ext.vendor_name != _REL_EXT_VENDOR:
+      continue
+    try:
+      payload = json.loads(ext.data)
+    except (json.JSONDecodeError, TypeError):
+      _warn(
+          rel.name,
+          f"custom extension {ext.vendor_name!r} is not valid JSON; ignored",
+      )
+      continue
+    if not isinstance(payload, dict) or _REL_EXT_KEY not in payload:
+      continue
+    block = payload[_REL_EXT_KEY]
+    if not isinstance(block, dict):
+      raise ConversionError(
+          f"relationship '{rel.name}': '{_REL_EXT_KEY}' must be a mapping"
+      )
+    merged.update(block)
+  return merged
+
+
+def _edge_property_fields(ext, rel_name):
+  """Return the edge-property fields from a `relationship` extension, as
+
+  `OSIField`s.
+
+  Validates each entry of the extension's `fields` list (see `_EDGE_FIELDS_KEY`)
+  with the shared `OSIField` model -- the same validation a node field gets --
+  so
+  a malformed edge field is reported the same way and both share one rendering
+  path. A relationship with no such fields yields an empty list.
+  """
+  fields = []
+  for raw in ext.get(_EDGE_FIELDS_KEY) or []:
+    try:
+      fields.append(OSIField.model_validate(raw))
+    except ValidationError as e:
+      raise ConversionError(
+          f"relationship '{rel_name}': invalid edge property:\n{e}"
+      ) from e
+  return fields
+
+
+def _normalize_edge(rel, datasets):
+  """Normalize a `relationship` into the internal edge shape, any cardinality.
+
+  Native `from`/`to`/`from_columns`/`to_columns` always name the two node
+  endpoints (`from` = source, `to` = destination). A Google-owned `relationship`
+  extension (see `_relationship_extension`) may add edge `fields`, and -- when
+  it
+  carries a `source` -- promotes the relationship to many-to-many, backed by
+  that
+  through-table (see `_normalize_many_to_many_edge`). Without a `source`, the
+  relationship is a plain many-to-one foreign-key edge backed by the `from`
+  table: that table is its own source node, so its primary key is both the edge
+  KEY and the SOURCE KEY (referencing itself), and the DESTINATION KEY is
+  `from_columns` referencing the `to` node's `to_columns`.
   """
   from_ds = datasets[rel.from_dataset]
   from_cols = _require_columns(rel.from_columns, rel.name, "from_columns")
   to_cols = _require_columns(rel.to_columns, rel.name, "to_columns")
+  ext = _relationship_extension(rel)
+  fields = _edge_property_fields(ext, rel.name)
+  if "source" in ext:
+    return _normalize_many_to_many_edge(rel, ext, from_cols, to_cols, fields)
   return {
       "name": rel.name,
       "backing": _qualify_table_name(from_ds.source, from_ds.name),
@@ -477,7 +566,7 @@ def _normalize_relationship_edge(rel, datasets):
       "dst_node": rel.to,
       "dst_columns": from_cols,
       "dst_references": to_cols,
-      "fields": _edge_property_fields(rel),
+      "fields": fields,
       "description": _element_description(rel),
       "synonyms": _element_synonyms(rel),
       # Direct-FK properties are columns of the `from` table, qualified by its
@@ -488,258 +577,67 @@ def _normalize_relationship_edge(rel, datasets):
   }
 
 
-# Vendor tag of the custom-extension entry that carries edge properties. This
-# is BigQuery's converter, so the extension is owned by Google rather than the
-# vendor-neutral COMMON namespace -- claiming COMMON for a convention that is
-# not yet standardized would overclaim. Edge properties are read only from this
-# vendor's extension; extensions owned by any other vendor are left untouched.
-_EDGE_FIELDS_VENDOR = "GOOGLE"
+def _normalize_many_to_many_edge(rel, ext, from_cols, to_cols, fields):
+  """Normalize a many-to-many relationship into the internal edge shape.
 
-# Key, inside that extension's JSON payload, of the `fields` list holding the
-# edge properties. Edge properties have no home in the core spec yet, so the
-# payload holds a `fields` list of the exact same shape as a dataset's `fields`
-# -- deliberately the form a future spec-native `relationships[].fields` would
-# take, so promoting it into the core spec later needs no change to already-
-# authored models.
-_EDGE_FIELDS_KEY = "fields"
-
-# Key, inside a *model-level* Google-owned extension's JSON payload, of the
-# `edges` list holding first-class edges (see `_first_class_edges`). A BigQuery
-# EDGE TABLE is structurally a NODE TABLE plus two endpoints, so an edge is
-# modeled exactly like a dataset -- its own `source`, `primary_key`, and
-# `fields`, plus a `source_key`/`destination_key` naming where it connects. The
-# core spec has no first-class edge slot yet, so the list rides in the
-# extension, shaped as a future spec-native `edges:` (a sibling of `datasets:`).
-_EDGE_LIST_KEY = "edges"
-
-
-def _edge_property_fields(rel):
-  """Return a relationship's declared edge-property fields as `OSIField`s.
-
-  Reads the relationship's Google-owned custom-extension entry (see
-  `_EDGE_FIELDS_VENDOR`) whose JSON payload carries a `fields` list (see
-  `_EDGE_FIELDS_KEY`) and validates each entry with the shared `OSIField` model
-  -- the same validation a node field gets -- so a malformed edge field is
-  reported the same way and both share one rendering path. Extensions owned by
-  other vendors are left untouched. A relationship with no such extension yields
-  an empty list; a non-JSON payload on this vendor's extension is ignored with a
-  warning.
+  A many-to-many edge is backed by its own through-table -- named by the
+  extension's `source` -- rather than by either node. The extension's
+  `source_key`/`destination_key` are that table's columns joining to the `from`
+  /
+  `to` node; they REFERENCE the native `from_columns` / `to_columns` on those
+  nodes (`from` = source, `to` = destination). The edge KEY is the extension's
+  `primary_key`, defaulting to the two join-column lists combined. Raises
+  ConversionError on a missing/malformed `source`, a non-list join-column list,
+  or a join-column/reference-column arity mismatch.
   """
-  fields = []
-  for ext in rel.custom_extensions or []:
-    if ext.vendor_name != _EDGE_FIELDS_VENDOR:
-      continue
-    try:
-      payload = json.loads(ext.data)
-    except (json.JSONDecodeError, TypeError):
-      _warn(
-          rel.name,
-          f"custom extension {ext.vendor_name!r} is not valid JSON; ignored",
-      )
-      continue
-    if not isinstance(payload, dict) or _EDGE_FIELDS_KEY not in payload:
-      continue
-    for raw in payload.get(_EDGE_FIELDS_KEY) or []:
-      try:
-        fields.append(OSIField.model_validate(raw))
-      except ValidationError as e:
-        raise ConversionError(
-            f"relationship '{rel.name}': invalid edge property:\n{e}"
-        ) from e
-  return fields
-
-
-def _first_class_edges(model):
-  """Return the raw first-class edge dicts declared on a model, in order.
-
-  Reads every model-level Google-owned custom-extension entry (see
-  `_EDGE_FIELDS_VENDOR`) whose JSON payload carries an `edges` list (see
-  `_EDGE_LIST_KEY`) and returns those entries unvalidated, for
-  `_normalize_first_class_edge` to check. Extensions owned by other vendors, and
-  payloads without an `edges` key, are ignored; a non-JSON payload on this
-  vendor's extension is skipped with a warning, and a non-list `edges` raises.
-  """
-  edges = []
-  for ext in model.custom_extensions or []:
-    if ext.vendor_name != _EDGE_FIELDS_VENDOR:
-      continue
-    try:
-      payload = json.loads(ext.data)
-    except (json.JSONDecodeError, TypeError):
-      _warn(
-          model.name,
-          f"custom extension {ext.vendor_name!r} is not valid JSON; ignored",
-      )
-      continue
-    if not isinstance(payload, dict) or _EDGE_LIST_KEY not in payload:
-      continue
-    raw_edges = payload.get(_EDGE_LIST_KEY)
-    if not isinstance(raw_edges, list):
-      raise ConversionError(
-          f"model '{model.name}': '{_EDGE_LIST_KEY}' must be a list of edges"
-      )
-    edges.extend(raw_edges)
-  return edges
-
-
-def _normalize_first_class_edge(raw, model, datasets, skipped):
-  """Normalize one first-class edge dict into the internal edge shape, or None.
-
-  A first-class edge is modeled like a dataset: its own `source` (backing
-  table),
-  `primary_key` (the edge KEY), and `fields` (edge properties), plus a
-  `source_key`/`destination_key` endpoint. Each endpoint is `{columns, node,
-  references}`: `columns` are the edge's own key columns, which REFERENCE `node`
-  (`references`); `references` defaults to that node's `primary_key`. The edge
-  `primary_key` defaults to the two endpoints' columns combined.
-
-  Returns the normalized edge, or None when it references a skipped dataset (no
-  valid node to attach to -- warned and dropped, as a dangling relationship is).
-  Raises ConversionError on a structurally invalid edge (missing name/source,
-  unknown node, malformed endpoint, or a columns/references arity mismatch).
-  """
-  if not isinstance(raw, dict):
-    raise ConversionError(f"model '{model.name}': each edge must be a mapping")
-  name = raw.get("name")
-  if not (isinstance(name, str) and name.strip()):
-    raise ConversionError(f"model '{model.name}': an edge is missing a 'name'")
-  ident = f"edge '{name}'"
-  source = raw.get("source")
+  ident = f"relationship '{rel.name}'"
+  source = ext.get("source")
   if not (isinstance(source, str) and source.strip()):
     raise ConversionError(
-        f"{ident}: 'source' is required and must be a project.dataset.table"
-        " string"
+        f"{ident}: 'relationship.source' is required and must be a"
+        " project.dataset.table string"
     )
-
-  src = _parse_endpoint(
-      raw.get("source_key"), ident, "source_key", datasets, skipped
+  source_key = _require_str_list(
+      ext.get("source_key"), ident, "relationship.source_key"
   )
-  dst = _parse_endpoint(
-      raw.get("destination_key"), ident, "destination_key", datasets, skipped
+  destination_key = _require_str_list(
+      ext.get("destination_key"), ident, "relationship.destination_key"
   )
-  dangling = [ep["node"] for ep in (src, dst) if ep["dangling"]]
-  if dangling:
-    _warn(
-        name,
-        f"references skipped dataset {', '.join(repr(n) for n in dangling)};"
-        " edge omitted",
+  if len(source_key) != len(from_cols):
+    raise ConversionError(
+        f"{ident}: 'relationship.source_key' has {len(source_key)} column(s)"
+        f" but 'from_columns' has {len(from_cols)}; they must match one to one"
     )
-    return None
-
-  key = raw.get("primary_key")
+  if len(destination_key) != len(to_cols):
+    raise ConversionError(
+        f"{ident}: 'relationship.destination_key' has {len(destination_key)}"
+        f" column(s) but 'to_columns' has {len(to_cols)}; they must match one"
+        " to one"
+    )
+  key = ext.get("primary_key")
   if key is None:
-    key = _dedup(src["columns"] + dst["columns"])
+    key = _dedup(source_key + destination_key)
   else:
-    key = _require_str_list(key, ident, "primary_key")
-
-  fields = []
-  for raw_field in raw.get(_EDGE_FIELDS_KEY) or []:
-    try:
-      fields.append(OSIField.model_validate(raw_field))
-    except ValidationError as e:
-      raise ConversionError(f"{ident}: invalid edge property:\n{e}") from e
-
-  # A junction edge is backed by its own table, distinct from either endpoint's
-  # node table; GRAPH_EXPAND ignores it, so it is excluded from the single-root
-  # check. A first-class edge backed by its own source node is a plain FK edge.
-  many_to_many = source.strip() != datasets[src["node"]].source.strip()
-
+    key = _require_str_list(key, ident, "relationship.primary_key")
   return {
-      "name": name,
-      "backing": _qualify_table_name(source, name),
+      "name": rel.name,
+      "backing": _qualify_table_name(source, rel.name),
       "key": key,
-      "src_node": src["node"],
-      "src_columns": src["columns"],
-      "src_references": src["references"],
-      "dst_node": dst["node"],
-      "dst_columns": dst["columns"],
-      "dst_references": dst["references"],
+      "src_node": rel.from_dataset,
+      "src_columns": source_key,
+      "src_references": from_cols,
+      "dst_node": rel.to,
+      "dst_columns": destination_key,
+      "dst_references": to_cols,
       "fields": fields,
-      "description": _raw_description(raw),
-      "synonyms": _raw_synonyms(raw),
-      # A first-class edge's properties are columns of its own backing table,
+      "description": _element_description(rel),
+      "synonyms": _element_synonyms(rel),
+      # A many-to-many edge's properties are columns of its own through-table,
       # carrying no node qualifier; pass the edge name, which will not match a
       # bare column, so nothing is stripped.
-      "strip_context": name,
-      "many_to_many": many_to_many,
+      "strip_context": rel.name,
+      "many_to_many": True,
   }
-
-
-def _parse_endpoint(raw_ep, ident, side, datasets, skipped):
-  """Validate one edge endpoint (`source_key`/`destination_key`) block.
-
-  Returns `{node, columns, references, dangling}`: `columns` are the edge's own
-  key columns, `node` is the dataset they REFERENCE, and `references` are that
-  node's key columns -- defaulting to the node's `primary_key` when omitted.
-  When
-  `node` is a skipped dataset, returns early with `dangling=True` (the caller
-  drops the edge) rather than validating columns. Raises ConversionError on a
-  missing/malformed block, an unknown node, or a columns/references arity
-  mismatch.
-  """
-  if not isinstance(raw_ep, dict):
-    raise ConversionError(
-        f"{ident}: '{side}' is required and must be a mapping with 'columns'"
-        " and 'node'"
-    )
-  node = raw_ep.get("node")
-  if not (isinstance(node, str) and node.strip()):
-    raise ConversionError(f"{ident}: '{side}.node' is required")
-  if node not in datasets:
-    raise ConversionError(
-        f"{ident}: '{side}.node' references unknown dataset {node!r}"
-    )
-  if node in skipped:
-    return {"node": node, "columns": [], "references": [], "dangling": True}
-  columns = _require_str_list(raw_ep.get("columns"), ident, f"{side}.columns")
-  references = raw_ep.get("references")
-  if references is None:
-    # A non-skipped node always has a primary_key (that is what skipping tests).
-    references = list(datasets[node].primary_key)
-  else:
-    references = _require_str_list(references, ident, f"{side}.references")
-  if len(columns) != len(references):
-    raise ConversionError(
-        f"{ident}: '{side}' has {len(columns)} column(s) but"
-        f" {len(references)} reference(s); they must match one to one"
-    )
-  return {
-      "node": node,
-      "columns": columns,
-      "references": references,
-      "dangling": False,
-  }
-
-
-def _raw_synonyms(raw):
-  """Return the synonyms from a raw edge dict's structured `ai_context`, else
-
-  an empty list -- the raw-dict counterpart of `_element_synonyms`.
-  """
-  ai = raw.get("ai_context")
-  if isinstance(ai, dict):
-    syn = ai.get("synonyms")
-    if isinstance(syn, list):
-      return [s for s in syn if isinstance(s, str)]
-  return []
-
-
-def _raw_description(raw):
-  """Return the description text for a raw edge dict, or None.
-
-  The raw-dict counterpart of `_element_description`: a `description` string
-  plus
-  a string-form `ai_context` folded in (a structured `ai_context` carries
-  synonyms, handled by `_raw_synonyms`).
-  """
-  parts = []
-  desc = raw.get("description")
-  if isinstance(desc, str) and desc.strip():
-    parts.append(desc.strip())
-  ai = raw.get("ai_context")
-  if isinstance(ai, str) and ai.strip():
-    parts.append(ai.strip())
-  return "\n".join(parts) if parts else None
 
 
 def _dedup(items):
@@ -756,10 +654,12 @@ def _dedup(items):
 def _require_str_list(value, ident, field_name):
   """Return `value` if it is a non-empty list of non-empty strings, else raise.
 
-  Used for the raw JSON column lists on a first-class `edge` (its `primary_key`
-  and each endpoint's `columns`/`references`), which -- unlike the core-spec
-  `from_columns`/`to_columns` -- pydantic has not already validated. `ident`
-  names the element (e.g. "edge 'enrolled_in'") for the error message.
+  Used for the raw JSON column lists a many-to-many `relationship` extension
+  adds
+  (its `source_key`, `destination_key`, and optional `primary_key`), which --
+  unlike the core-spec `from_columns`/`to_columns` -- pydantic has not already
+  validated. `ident` names the element (e.g. "relationship 'enrolled_in'") for
+  the error message.
   """
   if not (
       isinstance(value, list)
@@ -1054,9 +954,12 @@ def _element_description(element):
   """Return the description text for an Ossie model element, or None.
 
   `element` is any Ossie object that may carry `description`/`ai_context` (a
-  model, dataset, field, relationship, or metric). A string-form `ai_context`
-  (the schema allows a string or a structured object) has no options key of its
-  own, so it is folded into the description.
+  model, dataset, field, relationship, or metric). Text from `ai_context` is
+  folded into the description because BigQuery's only free-text option is
+  `description`: a string-form `ai_context` in full, and a structured
+  `ai_context`'s `instructions`. This also gives a relationship a description --
+  it is the one element with no `description` field of its own, so its human
+  description is authored as `ai_context.instructions`.
   """
   parts = []
   desc = getattr(element, "description", None)
@@ -1065,6 +968,8 @@ def _element_description(element):
   ai = getattr(element, "ai_context", None)
   if isinstance(ai, str) and ai.strip():
     parts.append(ai.strip())
+  elif isinstance(ai, OSIAIContextObject) and ai.instructions:
+    parts.append(ai.instructions.strip())
   return "\n".join(parts) if parts else None
 
 

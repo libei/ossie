@@ -559,16 +559,18 @@ def test_missing_join_columns_raise():
 #
 # BigQuery graph edge tables carry PROPERTIES just like node tables. The core
 # spec has no field slot on a relationship yet, so edge properties are declared
-# in a `custom_extensions` entry whose JSON payload mirrors the core `fields`
-# shape verbatim (the form a spec-native `relationships[].fields` would take).
+# under a Google-owned `relationship` custom extension whose `fields` list
+# mirrors the core `fields` shape verbatim (the form a spec-native
+# `relationships[].fields` would take).
 
 
 def _edge_fields_ext(fields):
   """A relationship `custom_extensions` block carrying edge-property fields."""
   return {
-      "custom_extensions": [
-          {"vendor_name": "GOOGLE", "data": json.dumps({"fields": fields})}
-      ]
+      "custom_extensions": [{
+          "vendor_name": "GOOGLE",
+          "data": json.dumps({"relationship": {"fields": fields}}),
+      }]
   }
 
 
@@ -658,61 +660,63 @@ def test_edge_extension_from_another_vendor_is_ignored():
   assert not any("not valid JSON" in m for m in _warnings_for(ossie))
 
 
-# --- many-to-many / first-class edges --------------------------------------
+# --- many-to-many edges -----------------------------------------------------
 #
-# A core-spec `relationship` is sugar for a many-to-one foreign-key edge backed
-# by the `from` table. A many-to-many link (a student takes many courses; a
-# course holds many students) has no foreign key to hang off, so it is backed by
-# its own junction table. BigQuery models that as an EDGE TABLE that is a NODE
-# TABLE plus two endpoints, so an edge is declared here exactly like a dataset:
-# its own `source`, `primary_key`, and `fields`, plus a `source_key`/
-# `destination_key` endpoint. The `edges` list rides in a model-level
-# Google-owned `custom_extensions` entry until the core spec grows an `edges:`.
+# Every edge is a `relationship`, whatever its cardinality. A plain relationship
+# is a many-to-one foreign-key edge backed by the `from` table. A many-to-many
+# link (a student takes many courses; a course holds many students) has no
+# foreign key to hang off, so it is backed by its own through-table. Native
+# `from`/`to`/`from_columns`/`to_columns` still name the two node endpoints
+# (`from` = source, `to` = destination); the through-table -- which the core
+# spec cannot express yet -- rides in a Google-owned `relationship` extension
+# carrying its `source`, `primary_key`, and `source_key`/`destination_key` join
+# columns. The through-table's own columns (`s_id`, `c_id`) are deliberately
+# named differently from the nodes' keys (`student_id`, `course_id`).
 
 
-def _edges_ext(edges):
-  """A model-level `custom_extensions` block carrying first-class edges."""
+# Native relationship fields naming the two node endpoints.
+_MN_REL = {
+    "name": "enrolled_in",
+    "from": "student",
+    "from_columns": ["student_id"],
+    "to": "course",
+    "to_columns": ["course_id"],
+}
+
+# The Google-owned `relationship` extension payload: the through-table detail.
+_MN_BLOCK = {
+    "source": "c.s.enrollment",
+    "primary_key": ["s_id", "c_id"],
+    "source_key": ["s_id"],
+    "destination_key": ["c_id"],
+}
+
+
+def _mn_ext(block):
+  """A `custom_extensions` block wrapping a `relationship` payload."""
   return {
       "custom_extensions": [
-          {"vendor_name": "GOOGLE", "data": json.dumps({"edges": edges})}
+          {"vendor_name": "GOOGLE", "data": json.dumps({"relationship": block})}
       ]
   }
 
 
-# A first-class edge backed by its own junction table, whose own key columns
-# (`s_id`, `c_id`) are deliberately named differently from the nodes' keys
-# (`student_id`, `course_id`) to show that the two are distinct.
-_EDGE = {
-    "name": "enrolled_in",
-    "source": "c.s.enrollment",
-    "primary_key": ["s_id", "c_id"],
-    "source_key": {
-        "columns": ["s_id"],
-        "node": "student",
-        "references": ["student_id"],
-    },
-    "destination_key": {
-        "columns": ["c_id"],
-        "node": "course",
-        "references": ["course_id"],
-    },
-}
+def _mn_model(block=None, rel_extra=None, custom_extensions=None):
+  """A two-node (student, course) model with one many-to-many relationship.
 
-
-def _edge_model(edge=None, extra=None, model_extra=None):
-  """A two-node (student, course) model carrying one first-class edge.
-
-  `edge` defaults to `_EDGE`; `extra` merges into the edge dict; `model_extra`
-  overrides the model-level extension (e.g. to inject a raw `custom_extensions`
-  instead of the generated `edges` one).
+  `block` overrides the `relationship` extension payload (defaults to
+  `_MN_BLOCK`); `rel_extra` merges extra native keys into the relationship;
+  `custom_extensions`, when given, is set on the relationship verbatim instead
+  of
+  the generated GOOGLE extension (e.g. to inject another vendor's entry).
   """
-  if model_extra is not None:
-    kwargs = model_extra
+  rel = dict(_MN_REL)
+  if rel_extra:
+    rel.update(rel_extra)
+  if custom_extensions is not None:
+    rel["custom_extensions"] = custom_extensions
   else:
-    e = dict(edge if edge is not None else _EDGE)
-    if extra:
-      e.update(extra)
-    kwargs = _edges_ext([e])
+    rel.update(_mn_ext(_MN_BLOCK if block is None else block))
   return _model(
       [
           {
@@ -726,7 +730,7 @@ def _edge_model(edge=None, extra=None, model_extra=None):
               "primary_key": ["course_id"],
           },
       ],
-      **kwargs,
+      relationships=[rel],
   )
 
 
@@ -739,175 +743,169 @@ def test_enrollment_graph_export_is_warning_free():
   assert _warnings_for(load_fixture("enrollment_ossie.yaml")) == []
 
 
-def test_first_class_edge_is_backed_by_its_own_source():
-  # The edge table is the junction, not either node's table.
-  out = _convert(_edge_model())
+def test_many_to_many_edge_is_backed_by_its_through_table():
+  # The edge table is the through-table, not either node's table.
+  out = _convert(_mn_model())
   assert "`c.s.enrollment` AS enrolled_in" in out
   assert "`c.s.student` AS enrolled_in" not in out
 
 
-def test_edge_endpoints_reference_two_nodes():
-  # source_key/destination_key columns are the edge's own (s_id, c_id); the
-  # REFERENCES targets are the nodes' key columns (student_id, course_id).
-  out = _convert(_edge_model())
+def test_many_to_many_endpoints_reference_the_two_nodes():
+  # source_key/destination_key are the through-table's own columns (s_id, c_id);
+  # the REFERENCES targets are the native from_columns/to_columns on the nodes.
+  out = _convert(_mn_model())
   assert "SOURCE KEY (s_id) REFERENCES student (student_id)" in out
   assert "DESTINATION KEY (c_id) REFERENCES course (course_id)" in out
 
 
-def test_edge_key_defaults_to_source_plus_destination_columns():
-  edge = dict(_EDGE)
-  del edge["primary_key"]
-  out = _convert(_edge_model(edge))
+def test_many_to_many_from_is_source_and_to_is_destination():
+  # `from` renders as SOURCE and `to` as DESTINATION -- the fixed direction.
+  block = dict(_MN_BLOCK)
+  block["source_key"] = ["from_col"]
+  block["destination_key"] = ["to_col"]
+  out = _convert(_mn_model(block=block))
+  assert "SOURCE KEY (from_col) REFERENCES student" in out
+  assert "DESTINATION KEY (to_col) REFERENCES course" in out
+
+
+def test_many_to_many_key_defaults_to_source_plus_destination_columns():
+  block = dict(_MN_BLOCK)
+  del block["primary_key"]
+  out = _convert(_mn_model(block=block))
   assert re.search(r"AS enrolled_in\n\s+KEY\(s_id, c_id\)", out)
 
 
-def test_edge_key_dedups_shared_columns():
-  # An edge keyed on a single shared column emits it once, not twice.
-  edge = {
-      "name": "link",
+def test_many_to_many_key_dedups_shared_columns():
+  # A through-table keyed on a single shared column emits it once, not twice.
+  block = {
       "source": "c.s.link",
-      "source_key": {
-          "columns": ["pair_id"],
-          "node": "student",
-          "references": ["student_id"],
-      },
-      "destination_key": {
-          "columns": ["pair_id"],
-          "node": "course",
-          "references": ["course_id"],
-      },
+      "source_key": ["pair_id"],
+      "destination_key": ["pair_id"],
   }
-  out = _convert(_edge_model(edge))
+  out = _convert(_mn_model(block=block))
   assert "KEY(pair_id)" in out
   assert "KEY(pair_id, pair_id)" not in out
 
 
-def test_edge_key_explicit_override():
-  out = _convert(_edge_model(extra={"primary_key": ["s_id", "c_id", "term"]}))
+def test_many_to_many_key_explicit_override():
+  block = dict(_MN_BLOCK)
+  block["primary_key"] = ["s_id", "c_id", "term"]
+  out = _convert(_mn_model(block=block))
   assert "KEY(s_id, c_id, term)" in out
 
 
-def test_edge_references_default_to_node_primary_key():
-  # An endpoint may omit `references`; it defaults to the node's primary_key.
-  edge = dict(_EDGE)
-  edge["source_key"] = {"columns": ["s_id"], "node": "student"}
-  edge["destination_key"] = {"columns": ["c_id"], "node": "course"}
-  out = _convert(_edge_model(edge))
-  assert "SOURCE KEY (s_id) REFERENCES student (student_id)" in out
-  assert "DESTINATION KEY (c_id) REFERENCES course (course_id)" in out
-
-
-def test_edge_composite_keys_preserve_order():
-  edge = {
+def test_many_to_many_composite_keys_preserve_order():
+  rel = {
       "name": "link",
-      "source": "c.s.link",
-      "source_key": {
-          "columns": ["sa", "sb"],
-          "node": "student",
-          "references": ["stu_a", "stu_b"],
-      },
-      "destination_key": {
-          "columns": ["da", "db"],
-          "node": "course",
-          "references": ["crs_a", "crs_b"],
-      },
+      "from": "student",
+      "from_columns": ["stu_a", "stu_b"],
+      "to": "course",
+      "to_columns": ["crs_a", "crs_b"],
   }
-  out = _convert(_edge_model(edge))
+  block = {
+      "source": "c.s.link",
+      "source_key": ["sa", "sb"],
+      "destination_key": ["da", "db"],
+  }
+  model = _model(
+      [
+          {
+              "name": "student",
+              "source": "c.s.student",
+              "primary_key": ["stu_a", "stu_b"],
+          },
+          {
+              "name": "course",
+              "source": "c.s.course",
+              "primary_key": ["crs_a", "crs_b"],
+          },
+      ],
+      relationships=[{**rel, **_mn_ext(block)}],
+  )
+  out = _convert(model)
   assert "SOURCE KEY (sa, sb) REFERENCES student (stu_a, stu_b)" in out
   assert "DESTINATION KEY (da, db) REFERENCES course (crs_a, crs_b)" in out
 
 
-def test_edge_properties_render_on_the_edge():
-  out = _convert(_edge_model(extra={"fields": [_field("grade")]}))
+def test_many_to_many_properties_render_on_the_edge():
+  block = dict(_MN_BLOCK)
+  block["fields"] = [_field("grade")]
+  out = _convert(_mn_model(block=block))
   assert "AS enrolled_in" in out
   assert re.search(r"^\s+grade\s*$", out, re.MULTILINE)
 
 
-def test_computed_edge_property_uses_expr_as_name():
-  out = _convert(
-      _edge_model(extra={"fields": [_field("total", "price * qty")]})
-  )
+def test_computed_many_to_many_property_uses_expr_as_name():
+  block = dict(_MN_BLOCK)
+  block["fields"] = [_field("total", "price * qty")]
+  out = _convert(_mn_model(block=block))
   assert "price * qty AS total" in out
 
 
-def test_invalid_first_class_edge_field_raises():
-  ossie = _edge_model(extra={"fields": [{"name": "bad"}]})
+def test_invalid_many_to_many_edge_field_raises():
+  block = dict(_MN_BLOCK)
+  block["fields"] = [{"name": "bad"}]
   with pytest.raises(ConversionError, match="invalid edge property"):
-    exporter.convert_ossie_to_bq_graph(ossie)
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
 
 
-def test_edge_missing_name_raises():
-  edge = dict(_EDGE)
-  del edge["name"]
-  with pytest.raises(ConversionError, match="missing a 'name'"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+def test_many_to_many_source_must_be_a_string():
+  block = dict(_MN_BLOCK)
+  block["source"] = ""
+  with pytest.raises(ConversionError, match="relationship.source"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
 
 
-def test_edge_missing_source_raises():
-  edge = dict(_EDGE)
-  del edge["source"]
-  with pytest.raises(ConversionError, match="'source' is required"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+def test_many_to_many_missing_source_key_raises():
+  block = dict(_MN_BLOCK)
+  del block["source_key"]
+  with pytest.raises(ConversionError, match=r"relationship\.source_key"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
 
 
-def test_edge_endpoint_not_a_mapping_raises():
-  edge = dict(_EDGE)
-  edge["source_key"] = ["s_id"]
-  with pytest.raises(ConversionError, match="'source_key' is required"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+def test_many_to_many_source_key_must_be_a_list():
+  block = dict(_MN_BLOCK)
+  block["source_key"] = "s_id"
+  with pytest.raises(ConversionError, match=r"relationship\.source_key"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
 
 
-def test_edge_endpoint_missing_columns_raises():
-  edge = dict(_EDGE)
-  edge["source_key"] = {"node": "student"}
-  with pytest.raises(ConversionError, match=r"source_key\.columns"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+def test_many_to_many_source_key_arity_must_match_from_columns():
+  block = dict(_MN_BLOCK)
+  block["source_key"] = ["s_id", "extra"]
+  with pytest.raises(ConversionError, match="must match one to one"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
 
 
-def test_edge_endpoint_unknown_node_raises():
-  edge = dict(_EDGE)
-  edge["destination_key"] = {"columns": ["c_id"], "node": "ghost"}
-  with pytest.raises(ConversionError, match="unknown dataset"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+def test_many_to_many_destination_key_arity_must_match_to_columns():
+  block = dict(_MN_BLOCK)
+  block["destination_key"] = ["c_id", "extra"]
+  with pytest.raises(ConversionError, match="must match one to one"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
 
 
-def test_edge_columns_references_arity_mismatch_raises():
-  edge = dict(_EDGE)
-  edge["source_key"] = {
-      "columns": ["s_id"],
-      "node": "student",
-      "references": ["student_id", "extra"],
-  }
-  with pytest.raises(ConversionError, match="must match"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(edge))
+def test_relationship_extension_must_be_a_mapping():
+  ce = [{"vendor_name": "GOOGLE", "data": json.dumps({"relationship": [1, 2]})}]
+  with pytest.raises(ConversionError, match="'relationship' must be a mapping"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(custom_extensions=ce))
 
 
-def test_edges_must_be_a_list():
-  model_extra = {
-      "custom_extensions": [
-          {"vendor_name": "GOOGLE", "data": json.dumps({"edges": {"x": 1}})}
-      ]
-  }
-  with pytest.raises(ConversionError, match="'edges' must be a list"):
-    exporter.convert_ossie_to_bq_graph(_edge_model(model_extra=model_extra))
-
-
-def test_edges_from_other_vendor_are_ignored():
-  # A model-level edges list owned by another vendor is not read.
-  model_extra = {
-      "custom_extensions": [{
-          "vendor_name": "SNOWFLAKE",
-          "data": json.dumps({"edges": [_EDGE]}),
-      }]
-  }
-  out = _convert(_edge_model(model_extra=model_extra))
-  assert "EDGE TABLES" not in out
+def test_relationship_extension_from_other_vendor_is_ignored():
+  # A `relationship` block owned by another vendor is not read, so the
+  # through-table detail is not applied; the relationship falls back to a plain
+  # one-to-many FK edge (backed by `from`), never touching `c.s.enrollment`.
+  ce = [{
+      "vendor_name": "SNOWFLAKE",
+      "data": json.dumps({"relationship": _MN_BLOCK}),
+  }]
+  out = _convert(_mn_model(custom_extensions=ce))
   assert "c.s.enrollment" not in out
+  assert "`c.s.student` AS enrolled_in" in out  # fell back to a 1:M FK edge
 
 
-def test_edge_to_keyless_node_is_dropped_with_warning():
-  # An endpoint node with no primary_key cannot be a graph node, so the edge
-  # that references it is dropped with a warning (as a dangling FK edge is).
+def test_many_to_many_to_keyless_node_is_dropped_with_warning():
+  # A node with no primary_key cannot be a graph node, so the M:N edge that
+  # references it is dropped with a warning (as a dangling FK edge is).
   model = _model(
       [
           {
@@ -917,7 +915,7 @@ def test_edge_to_keyless_node_is_dropped_with_warning():
           },
           {"name": "course", "source": "c.s.course"},  # no PK -> skipped
       ],
-      **_edges_ext([_EDGE]),
+      relationships=[{**_MN_REL, **_mn_ext(_MN_BLOCK)}],
   )
   out = _convert(model)
   assert "EDGE TABLES" not in out
@@ -925,9 +923,27 @@ def test_edge_to_keyless_node_is_dropped_with_warning():
 
 
 def test_enrollment_graph_suppresses_single_root_warning():
-  # A junction edge is ignored by GRAPH_EXPAND and references both nodes, so the
-  # single-root heuristic does not apply -- no root warning.
-  assert not any("root node table" in m for m in _warnings_for(_edge_model()))
+  # A many-to-many edge is ignored by GRAPH_EXPAND and references both nodes, so
+  # the single-root heuristic does not apply -- no root warning.
+  assert not any("root node table" in m for m in _warnings_for(_mn_model()))
+
+
+def test_relationship_instructions_render_as_edge_description():
+  # A relationship has no `description` field, so its human description is
+  # authored as ai_context.instructions and rendered as the edge's OPTIONS
+  # description (the one place BigQuery exposes free text on a label).
+  out = _convert(
+      _mn_model(
+          rel_extra={
+              "ai_context": {
+                  "instructions": "How a student links to a course",
+                  "synonyms": ["takes"],
+              }
+          }
+      )
+  )
+  assert 'description="How a student links to a course"' in out
+  assert 'synonyms=["takes"]' in out
 
 
 # --- root-node validation --------------------------------------------------
