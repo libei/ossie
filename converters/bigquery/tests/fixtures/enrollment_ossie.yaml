@@ -119,6 +119,22 @@ semantic_model:
           synonyms:
             - takes
             - registered for
+        # The through-table rides here, in a GOOGLE-vendored `relationship`
+        # extension -- an opaque JSON string the core spec carries through
+        # untouched. The converter reads these keys:
+        #   source          -- the junction/through-table (campus.public.enrollment).
+        #                       Its presence is what marks this edge many-to-many;
+        #                       a relationship with no `source` is a plain 1:M FK.
+        #   primary_key     -- the junction's own key, used to de-duplicate rows.
+        #   source_key      -- junction column(s) that join to the `from` node
+        #                       (student). Rendered as BigQuery's SOURCE KEY.
+        #   destination_key -- junction column(s) that join to the `to` node
+        #                       (course). Rendered as BigQuery's DESTINATION KEY.
+        #   fields          -- edge properties, same shape as a node `fields`
+        #                       entry; they become PROPERTIES on the edge table.
+        # NOTE: `#` comments cannot live inside the `data: |` block below -- YAML
+        # keeps block-scalar lines verbatim, so any `#` there would become part
+        # of the JSON and break it. Hence this legend sits outside the block.
         custom_extensions:
           - vendor_name: GOOGLE
             data: |

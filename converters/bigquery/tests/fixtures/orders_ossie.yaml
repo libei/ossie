@@ -108,6 +108,15 @@ semantic_model:
           synonyms:
             - ordered by
             - purchased by
+        # This is an ordinary one-to-many edge (no `source`), but it still needs
+        # a place to declare its own PROPERTIES, which the core relationship
+        # shape has no slot for yet. So the GOOGLE `relationship` extension here
+        # carries just `fields` -- edge-property definitions in the exact shape a
+        # node's `fields` entry takes (name, expression, description, ai_context).
+        # They become PROPERTIES on the edge table. Because there is no `source`
+        # key, the converter treats the edge as 1:M, not many-to-many.
+        # NOTE: `#` comments cannot go inside the `data: |` block below -- YAML
+        # keeps block-scalar lines verbatim, so this note sits outside it.
         custom_extensions:
           - vendor_name: GOOGLE
             data: |
