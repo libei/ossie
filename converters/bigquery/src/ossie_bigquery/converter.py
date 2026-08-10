@@ -246,6 +246,27 @@ def _render_property_graph(model):
       continue
     edges.append(_normalize_edge(rel, datasets))
 
+  # A graph's element labels -- one per node table and one per edge table --
+  # share a single namespace, so `AS <label>` must be unique across both. Node
+  # names are already known distinct (checked above); reject an edge whose name
+  # repeats another edge's or collides with a node, which would otherwise emit
+  # DDL BigQuery rejects at deploy.
+  edge_names = [edge["name"] for edge in edges]
+  dupe_edges = _duplicate_names(edge_names)
+  if dupe_edges:
+    raise ConversionError(
+        f"Model '{model.name}': duplicate relationship name"
+        f" {', '.join(repr(d) for d in dupe_edges)}"
+    )
+  rendered_nodes = set(node_names)
+  collisions = [name for name in edge_names if name in rendered_nodes]
+  if collisions:
+    raise ConversionError(
+        f"Model '{model.name}': relationship name"
+        f" {', '.join(repr(c) for c in collisions)} collides with a dataset"
+        " name; a graph's node and edge labels must be distinct"
+    )
+
   edge_tables = [_render_edge(edge) for edge in edges]
 
   # The single-root check is a GRAPH_EXPAND concern: that flattening walks a
@@ -478,6 +499,12 @@ _REL_EXT_KEY = "relationship"
 # holds a `fields` list of the exact same shape as a dataset's `fields`.
 _EDGE_FIELDS_KEY = "fields"
 
+# Keys, inside the `relationship` object, that describe a many-to-many edge's
+# through-table and so are meaningless without a `source`. If any appears
+# without `source`, the author meant a many-to-many edge but the converter would
+# otherwise silently emit a one-to-many FK edge, so it is an error.
+_MN_KEYS_REQUIRING_SOURCE = ("source_key", "destination_key", "primary_key")
+
 
 def _relationship_extension(rel):
   """Return the merged Google-owned `relationship` extension payload, or {}.
@@ -487,7 +514,9 @@ def _relationship_extension(rel):
   `_REL_EXT_KEY`) and merges them into one dict for the caller to interpret.
   Extensions owned by other vendors, and payloads without a `relationship` key,
   are ignored; a non-JSON payload on this vendor's extension is skipped with a
-  warning, and a non-mapping `relationship` raises.
+  warning, and a non-mapping `relationship` raises. Merging is loss-free: edge
+  `fields` from every entry concatenate, and any other key redefined with a
+  conflicting value raises rather than being silently overwritten.
   """
   merged = {}
   for ext in rel.custom_extensions or []:
@@ -508,8 +537,33 @@ def _relationship_extension(rel):
       raise ConversionError(
           f"relationship '{rel.name}': '{_REL_EXT_KEY}' must be a mapping"
       )
-    merged.update(block)
+    _merge_relationship_block(merged, block, rel.name)
   return merged
+
+
+def _merge_relationship_block(merged, block, rel_name):
+  """Merge one `relationship` extension block into `merged`, in place.
+
+  Edge-property `fields` lists concatenate so no entry's properties are lost; a
+  non-list `fields` is rejected here so downstream code always sees a list. Any
+  other key redefined with a conflicting value raises rather than being silently
+  overwritten (a later `dict.update` would drop the earlier author's detail).
+  """
+  for key, value in block.items():
+    if key == _EDGE_FIELDS_KEY:
+      if not isinstance(value, list):
+        raise ConversionError(
+            f"relationship '{rel_name}': '{_REL_EXT_KEY}.{_EDGE_FIELDS_KEY}'"
+            " must be a list of edge properties"
+        )
+      merged.setdefault(_EDGE_FIELDS_KEY, []).extend(value)
+    elif key in merged and merged[key] != value:
+      raise ConversionError(
+          f"relationship '{rel_name}': '{_REL_EXT_KEY}.{key}' is defined more"
+          " than once with conflicting values"
+      )
+    else:
+      merged[key] = value
 
 
 def _edge_property_fields(ext, rel_name):
@@ -555,26 +609,41 @@ def _normalize_edge(rel, datasets):
   ext = _relationship_extension(rel)
   fields = _edge_property_fields(ext, rel.name)
   if "source" in ext:
-    return _normalize_many_to_many_edge(rel, ext, from_cols, to_cols, fields)
-  return {
-      "name": rel.name,
-      "backing": _qualify_table_name(from_ds.source, from_ds.name),
-      "key": from_ds.primary_key,
-      "src_node": rel.from_dataset,
-      "src_columns": from_ds.primary_key,
-      "src_references": from_ds.primary_key,
-      "dst_node": rel.to,
-      "dst_columns": from_cols,
-      "dst_references": to_cols,
-      "fields": fields,
-      "description": _element_description(rel),
-      "synonyms": _element_synonyms(rel),
-      # Direct-FK properties are columns of the `from` table, qualified by its
-      # node name; strip that qualifier so `orders.order_date` renders as
-      # `order_date`.
-      "strip_context": from_ds.name,
-      "many_to_many": False,
-  }
+    edge = _normalize_many_to_many_edge(rel, ext, from_cols, to_cols, fields)
+  else:
+    # A many-to-many through-table's join columns are meaningless without a
+    # `source`; if the author supplied them but no `source`, they meant a
+    # many-to-many edge. Fail loudly rather than silently emit a one-to-many FK
+    # edge and drop those keys.
+    orphan = next((k for k in _MN_KEYS_REQUIRING_SOURCE if k in ext), None)
+    if orphan is not None:
+      raise ConversionError(
+          f"relationship '{rel.name}': '{_REL_EXT_KEY}.{orphan}' requires"
+          f" '{_REL_EXT_KEY}.source' (a many-to-many edge's through-table);"
+          " without it the relationship is a one-to-many edge and the key is"
+          " ignored"
+      )
+    edge = {
+        "name": rel.name,
+        "backing": _qualify_table_name(from_ds.source, from_ds.name),
+        "key": from_ds.primary_key,
+        "src_node": rel.from_dataset,
+        "src_columns": from_ds.primary_key,
+        "src_references": from_ds.primary_key,
+        "dst_node": rel.to,
+        "dst_columns": from_cols,
+        "dst_references": to_cols,
+        "fields": fields,
+        "description": _element_description(rel),
+        "synonyms": _element_synonyms(rel),
+        # Direct-FK properties are columns of the `from` table, qualified by its
+        # node name; strip that qualifier so `orders.order_date` renders as
+        # `order_date`.
+        "strip_context": from_ds.name,
+        "many_to_many": False,
+    }
+  _warn_on_nonkey_references(edge, datasets)
+  return edge
 
 
 def _normalize_many_to_many_edge(rel, ext, from_cols, to_cols, fields):
@@ -638,6 +707,28 @@ def _normalize_many_to_many_edge(rel, ext, from_cols, to_cols, fields):
       "strip_context": rel.name,
       "many_to_many": True,
   }
+
+
+def _warn_on_nonkey_references(edge, datasets):
+  """Warn when an edge endpoint REFERENCES columns that are not the node's KEY.
+
+  BigQuery requires a SOURCE/DESTINATION KEY to REFERENCE the referenced node
+  table's KEY columns. This is a deploy-time constraint (like the single-root
+  check), so a mismatch warns rather than raises. Column order is not compared,
+  since it is the column *set* BigQuery matches against the node's KEY.
+  """
+  for side, node_name, references in (
+      ("SOURCE KEY", edge["src_node"], edge["src_references"]),
+      ("DESTINATION KEY", edge["dst_node"], edge["dst_references"]),
+  ):
+    node_key = list(datasets[node_name].primary_key or [])
+    if set(references) != set(node_key):
+      _warn(
+          edge["name"],
+          f"{side} REFERENCES {node_name} ({', '.join(references)}) but that"
+          f" node's KEY is ({', '.join(node_key)}); BigQuery requires an edge"
+          " to reference the node table's KEY",
+      )
 
 
 def _dedup(items):

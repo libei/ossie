@@ -608,6 +608,12 @@ These are hard requirements — violating one raises a `ConversionError`:
 - Every dataset needs a string `name`; names must be unique.
 - Each relationship must name a `from`/`to` that exist, plus non-empty
   `from_columns` and `to_columns`.
+- Relationship (edge) names must be unique and distinct from every dataset
+  (node) name — a graph's node and edge labels share one namespace.
+- A many-to-many relationship's `relationship.source_key`,
+  `destination_key`, and `primary_key` require a `relationship.source` (the
+  through-table); supplied without it, they are treated as an error rather than
+  silently emitting a one-to-many edge.
 
 ## Limitations
 
@@ -652,6 +658,7 @@ element it concerns in brackets, e.g. `[customer_lifetime_value] metric spans �
 | `custom extension … is not valid JSON` | a relationship's edge-property extension payload isn't JSON | fix the `custom_extensions[].data` JSON, or remove it |
 | `synonym … duplicates the name it labels` / `duplicate synonym … dropped` | a synonym repeats the label/property name, or the list repeats a synonym (BigQuery treats a name as an implicit synonym of itself and rejects either, case-insensitively) | nothing required — the duplicate is dropped so the DDL stays valid; remove it upstream to silence the warning |
 | `graph has no root node table` / `multiple root node tables` | not exactly one root | adjust relationships so one node has no incoming edge |
+| `requires an edge to reference the node table's KEY` | an endpoint's `from_columns`/`to_columns` (a `SOURCE`/`DESTINATION KEY … REFERENCES` target) is not the referenced node's `primary_key` | reference the node's key columns, or BigQuery rejects the DDL at deploy |
 | `multiple semantic models found` | more than one model in the file | split them, or accept only the first being used |
 
 ## Development

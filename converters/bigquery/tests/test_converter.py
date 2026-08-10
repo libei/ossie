@@ -946,6 +946,124 @@ def test_relationship_instructions_render_as_edge_description():
   assert 'synonyms=["takes"]' in out
 
 
+def test_many_to_many_keys_without_source_raise():
+  # source_key/destination_key describe a through-table and are meaningless
+  # without `source`; supplying them but not `source` is many-to-many intent, so
+  # it fails loudly rather than silently emitting a one-to-many FK edge.
+  block = dict(_MN_BLOCK)
+  del block["source"]
+  with pytest.raises(ConversionError, match="requires 'relationship.source'"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
+
+
+def test_duplicate_relationship_names_raise():
+  # Two edges named alike would emit two `AS <name>` edge tables that collide.
+  model = _model(
+      [
+          {"name": "a", "source": "c.s.a", "primary_key": ["id"]},
+          {"name": "b", "source": "c.s.b", "primary_key": ["id"]},
+          {"name": "c", "source": "c.s.c", "primary_key": ["id"]},
+      ],
+      relationships=[
+          {
+              "name": "link",
+              "from": "a",
+              "from_columns": ["id"],
+              "to": "b",
+              "to_columns": ["id"],
+          },
+          {
+              "name": "link",
+              "from": "a",
+              "from_columns": ["id"],
+              "to": "c",
+              "to_columns": ["id"],
+          },
+      ],
+  )
+  with pytest.raises(ConversionError, match="duplicate relationship name"):
+    exporter.convert_ossie_to_bq_graph(model)
+
+
+def test_relationship_name_colliding_with_dataset_raises():
+  # A graph's node and edge labels share one namespace, so an edge cannot reuse
+  # a node's name.
+  model = _model(
+      [
+          {
+              "name": "student",
+              "source": "c.s.student",
+              "primary_key": ["student_id"],
+          },
+          {
+              "name": "course",
+              "source": "c.s.course",
+              "primary_key": ["course_id"],
+          },
+      ],
+      relationships=[{
+          "name": "student",
+          "from": "student",
+          "from_columns": ["student_id"],
+          "to": "course",
+          "to_columns": ["course_id"],
+      }],
+  )
+  with pytest.raises(ConversionError, match="collides with a dataset name"):
+    exporter.convert_ossie_to_bq_graph(model)
+
+
+def test_non_list_edge_fields_raise_cleanly():
+  # A scalar `fields` is a clean ConversionError, not a raw TypeError.
+  block = dict(_MN_BLOCK)
+  block["fields"] = 5
+  with pytest.raises(ConversionError, match=r"relationship\.fields"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(block=block))
+
+
+def test_edge_fields_from_multiple_extensions_concatenate():
+  # Two Google-owned entries each carrying `fields` keep both, not just the last.
+  ce = [
+      {
+          "vendor_name": "GOOGLE",
+          "data": json.dumps({"relationship": {"fields": [_field("grade")]}}),
+      },
+      {
+          "vendor_name": "GOOGLE",
+          "data": json.dumps({"relationship": {"fields": [_field("term")]}}),
+      },
+  ]
+  out = _convert(_mn_model(custom_extensions=ce))
+  assert re.search(r"^\s+grade,?\s*$", out, re.MULTILINE)
+  assert re.search(r"^\s+term,?\s*$", out, re.MULTILINE)
+
+
+def test_conflicting_extension_keys_raise():
+  # A scalar key redefined with a different value across entries is an error,
+  # never a silent overwrite.
+  ce = [
+      {
+          "vendor_name": "GOOGLE",
+          "data": json.dumps({"relationship": {"source": "c.s.a"}}),
+      },
+      {
+          "vendor_name": "GOOGLE",
+          "data": json.dumps({"relationship": {"source": "c.s.b"}}),
+      },
+  ]
+  with pytest.raises(ConversionError, match="defined more than once"):
+    exporter.convert_ossie_to_bq_graph(_mn_model(custom_extensions=ce))
+
+
+def test_endpoint_referencing_non_key_columns_warns():
+  # BigQuery requires an edge to REFERENCE the node's KEY; a mismatch warns.
+  block = dict(_MN_BLOCK)
+  model = _mn_model(block=block, rel_extra={"to_columns": ["not_the_pk"]})
+  assert any(
+      "reference the node table's KEY" in m for m in _warnings_for(model)
+  )
+
+
 # --- root-node validation --------------------------------------------------
 
 
