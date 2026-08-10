@@ -19,53 +19,54 @@
 
 # Apache Ossie BigQuery Converter
 
-Convert an [Apache Ossie](https://github.com/apache/ossie) semantic model into a
-[BigQuery Graph](https://docs.cloud.google.com/bigquery/docs/graph-measures)
-(with measures).
+Turn an [Apache Ossie](https://github.com/apache/ossie) semantic model into a
+[BigQuery Graph](https://docs.cloud.google.com/bigquery/docs/graph-measures) — a
+queryable property graph with fan-out-safe measures.
 
 The converter is an **offline text transform**: an Ossie model (YAML) goes in, a
 single `CREATE OR REPLACE PROPERTY GRAPH` statement (SQL) comes out. It never
-connects to BigQuery, reads no data, and creates or deploys nothing — you run the
-emitted DDL yourself.
-
-It is **export-only** (Ossie → BigQuery Graph DDL), like several other
-export-only spokes in this repo.
+connects to BigQuery, reads no data, and deploys nothing — you run the emitted
+DDL yourself, whenever and however you like. It is **export-only** (Ossie →
+BigQuery Graph DDL), like several other export-only spokes in this repo.
 
 ## Contents
 
-- [Why BigQuery Graph](#why-bigquery-graph)
-- [Install](#install)
-- [Quick start](#quick-start)
-- [CLI reference](#cli-reference)
-- [Python API](#python-api)
-- [How the model maps](#how-the-model-maps)
-- [Metrics and measures](#metrics-and-measures)
-- [Deploying the DDL](#deploying-the-ddl)
-- [Querying the graph and measures](#querying-the-graph-and-measures)
-- [Requirements](#requirements)
-- [Limitations](#limitations)
-- [Warnings reference](#warnings-reference)
-- [Development](#development)
+Read top to bottom the first time — each section builds on the one before it.
+
+1. [Why BigQuery Graph](#why-bigquery-graph) — what you get, and the one idea that makes it worth it
+2. [Install](#install)
+3. [Quick start](#quick-start) — a model in, DDL out, deployed and queried
+4. [How the model maps](#how-the-model-maps) — the conversion, rule by rule
+   - [Dataset → node table](#dataset--node-table)
+   - [Relationship → edge table](#relationship--edge-table)
+   - [Edge properties](#edge-properties)
+   - [Many-to-many edges](#many-to-many-edges)
+   - [Metric → measure](#metric--measure)
+5. [Run it in BigQuery](#run-it-in-bigquery)
+   - [Deploy the DDL](#deploy-the-ddl)
+   - [Query the graph and measures](#query-the-graph-and-measures)
+6. [Reference](#reference)
+   - [CLI](#cli)
+   - [Python API](#python-api)
+   - [Requirements](#requirements)
+   - [Limitations](#limitations)
+   - [Warnings](#warnings)
+7. [Development](#development)
 
 ## Why BigQuery Graph
 
-An Ossie semantic model is a star/snowflake of datasets joined by foreign keys,
-with model-level metrics. That maps directly onto BigQuery Graph's native model:
+An Ossie semantic model is already a graph: **datasets** are the entities,
+**relationships** are the foreign keys between them, and **metrics** are
+aggregates over them. BigQuery Graph is the native home for that shape, so the
+mapping is direct — and one property makes the trip worth it:
 
-| Apache Ossie | BigQuery Graph |
-| --- | --- |
-| `dataset` (`source` = `project.dataset.table`) | **NODE TABLE** — `KEY` from `primary_key`, `PROPERTIES` from `fields` |
-| `relationship` (`from`/`to`/`from_columns`/`to_columns`) | **EDGE TABLE** — `SOURCE KEY … REFERENCES` / `DESTINATION KEY … REFERENCES` |
-| single-table `metric` | `MEASURE(<agg>) AS <name>` in the owning node's `PROPERTIES` |
-| `field` | graph property (bare column, or `<expr> AS <name>` for a computed field) |
-| `description` + `ai_context.synonyms` | `OPTIONS(description="…", synonyms=["…"])` |
-
-A graph **measure** binds an aggregate to exactly one table's `KEY`. BigQuery then
-keeps the aggregate correct even when a join fans the rows out — the aggregation
-"locks" to the key and runs once per key, so a customer's revenue is not
-double-counted because the customer has three orders. The cross-table rollup
-happens at query time via `GRAPH_EXPAND` + `AGG` (see
-[Querying the graph and measures](#querying-the-graph-and-measures)).
+**Measures stay correct under fan-out.** A graph *measure* binds an aggregate to
+exactly one table's `KEY`. BigQuery locks the aggregation to that key and
+evaluates it once per key, even when a join fans the rows out — so a customer's
+revenue is not triple-counted just because that customer has three orders. You
+declare the metric once, on its owning table; the cross-table rollup happens at
+query time through `GRAPH_EXPAND` + `AGG`, and it is always fan-out-safe. That is
+the payoff the rest of this guide builds toward.
 
 ## Install
 
@@ -81,7 +82,10 @@ parse and validate the model), `PyYAML` (reading the YAML), and `sqlglot`
 
 ## Quick start
 
-Save this as `sales.yaml`:
+The fastest way to understand the converter is to watch one small model make the
+whole trip: **author → convert → deploy → query.**
+
+**1. Author** a model. Save this as `sales.yaml`:
 
 ```yaml
 version: "0.2.0.dev0"
@@ -119,13 +123,14 @@ semantic_model:
         description: Total order revenue
 ```
 
-Convert it:
+**2. Convert** it:
 
 ```bash
 ossie-bigquery export -i sales.yaml -o sales_graph.sql
 ```
 
-`sales_graph.sql` contains exactly:
+`sales_graph.sql` now contains exactly this — two node tables, one edge, and the
+`total_revenue` metric rendered as a `MEASURE` on the node it aggregates:
 
 ```sql
 CREATE OR REPLACE PROPERTY GRAPH sales_graph
@@ -153,9 +158,9 @@ CREATE OR REPLACE PROPERTY GRAPH sales_graph
   OPTIONS(description="Minimal sales model");
 ```
 
-[Deploy it](#deploying-the-ddl), then get revenue per country without
-double-counting fan-out (the graph is named `sales_graph`, matching the model
-`name`; see [Where the graph lives](#deploying-the-ddl) to target a dataset):
+**3. Deploy** it (see [Deploy the DDL](#deploy-the-ddl)), then **4. query** it —
+revenue per country, with no fan-out double-counting. The graph is named
+`sales_graph`, matching the model `name`:
 
 ```sql
 SELECT
@@ -165,58 +170,26 @@ FROM GRAPH_EXPAND("sales_graph")
 GROUP BY customer_country;
 ```
 
-## CLI reference
-
-```
-ossie-bigquery export -i <model.yaml> [-o <graph.sql>]
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `-i`, `--input` | input Apache Ossie YAML file (required) |
-| `-o`, `--output` | output `.sql` file; **omit for stdout** |
-
-- With no `-o`, the result goes to **stdout**, so you can pipe it:
-  ```bash
-  ossie-bigquery export -i sales.yaml | bq query --use_legacy_sql=false --nouse_cache
-  ```
-- Conversions that drop information print **warnings to stderr** and keep going
-  (see [Warnings reference](#warnings-reference)). Redirect them away with
-  `2>/dev/null`, or capture them with `2> warnings.txt`.
-- Any input that breaks a hard [requirement](#requirements) raises a
-  `ConversionError`; the CLI prints `Error: …` to stderr and exits `1`.
-
-## Python API
-
-The conversion function is a pure `str -> str`; do file I/O yourself.
-
-```python
-import warnings
-from ossie_bigquery import convert_ossie_to_bq_graph, ConversionError
-
-with open("sales.yaml") as fh:
-    model = fh.read()
-
-try:
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        ddl = convert_ossie_to_bq_graph(model)
-    for w in caught:
-        print("dropped:", w.message)   # e.g. a cross-dataset metric that was skipped
-except ConversionError as e:
-    raise SystemExit(f"cannot convert: {e}")
-
-with open("sales_graph.sql", "w") as fh:
-    fh.write(ddl)
-```
+That is the entire loop. The next section explains each mapping the converter
+made along the way.
 
 ## How the model maps
 
-Each rule below shows the Ossie input and the emitted DDL, adapted from the
+Five rules cover the whole conversion:
+
+| Apache Ossie | BigQuery Graph |
+| --- | --- |
+| `dataset` (`source` = `project.dataset.table`) | **NODE TABLE** — `KEY` from `primary_key`, `PROPERTIES` from `fields` |
+| `relationship` (`from`/`to`/`from_columns`/`to_columns`) | **EDGE TABLE** — `SOURCE KEY … REFERENCES` / `DESTINATION KEY … REFERENCES` |
+| single-table `metric` | `MEASURE(<agg>) AS <name>` in the owning node's `PROPERTIES` |
+| `field` | graph property (bare column, or `<expr> AS <name>` for a computed field) |
+| `description` + `ai_context.synonyms` | `OPTIONS(description="…", synonyms=["…"])` |
+
+Each rule below pairs the Ossie input with the DDL it produces, adapted from the
 [`examples/tpcds_semantic_model.yaml`](../../examples/tpcds_semantic_model.yaml)
-model that ships with Ossie (some fields trimmed for brevity). Each SQL block is
-an **excerpt** of the single `CREATE OR REPLACE PROPERTY GRAPH` statement, shown
-with the exact indentation the converter emits — following BigQuery's canonical
+model that ships with Ossie (some fields trimmed for brevity). Every SQL block is
+an **excerpt** of the one `CREATE OR REPLACE PROPERTY GRAPH` statement, shown
+with the exact indentation the converter emits: following BigQuery's canonical
 layout, `NODE TABLES` / `EDGE TABLES` nest under `CREATE`, each element table
 nests under those, and its clauses nest again (so a node entry sits at four
 spaces).
@@ -291,7 +264,7 @@ Composite join columns keep their order and are matched positionally:
 `from_columns: [a, b]` with `to_columns: [x, y]` pairs `a→x`, `b→y`.
 
 A plain foreign-key edge is **many-to-one**: each `from` row links to at most one
-`to` row. For a **many-to-many** link, back the edge with a through-table — see
+`to` row. For a **many-to-many** link, back the edge with its own table — see
 [Many-to-many edges](#many-to-many-edges).
 
 ### Edge properties
@@ -354,20 +327,20 @@ Every edge is a `relationship`, whatever its cardinality — so a **many-to-many
 link lives in the same `relationships:` block as any many-to-one edge. A plain
 relationship is a many-to-one foreign-key edge backed by the `from` table. A
 many-to-many link — a student takes many courses, and a course holds many
-students — has no foreign key to hang off; it lives in its own **through-table**
-with one row per pair.
+students — has no foreign key to hang off: it lives in its own table with one row
+per pair, which BigQuery declares as the graph's **edge table**.
 
 The native relationship fields still name the two node endpoints: `from`/`to`
 are the nodes, and `from_columns`/`to_columns` are the columns referenced **on**
-those nodes. The one thing the core spec can't express yet — the through-table —
-rides in a `GOOGLE`-owned `custom_extensions` entry on that relationship, whose
-JSON payload holds a `relationship` object. It is named `relationship` (not
-`edge`) because what it augments **is** a relationship, and it is deliberately
-the shape a future spec-native addition to `relationships[]` would take, so
-promoting it into the core spec later needs no change to already-authored
-models. The through-table appears only as `source`; it is **never** a
-`dataset`, because in BigQuery Graph a dataset is an entity (a node), not a
-relationship.
+those nodes. The one thing the core spec can't express yet — the table that backs
+the edge — rides in a `GOOGLE`-owned `custom_extensions` entry on that
+relationship, whose JSON payload holds a `relationship` object. It is named
+`relationship` (not `edge`) because what it augments **is** a relationship, and
+it is deliberately the shape a future spec-native addition to `relationships[]`
+would take, so promoting it into the core spec later needs no change to
+already-authored models. That backing table appears only as `source`; it is
+**never** a `dataset`, because in BigQuery Graph a dataset is an entity (a node),
+not a relationship.
 
 ```yaml
 semantic_model:
@@ -420,23 +393,30 @@ source, `to` = destination**:
 | `SOURCE KEY (s_id) REFERENCES student (student_id)` | `source_key` + native `from` / `from_columns` |
 | `DESTINATION KEY (c_id) REFERENCES course (course_id)` | `destination_key` + native `to` / `to_columns` |
 
-- `source` is the through-table that backs the edge (a `project.dataset.table`;
-  the converter references it, it does not create it). Its own key columns
-  (`s_id`, `c_id`) are named here so they need not match the nodes' keys.
+- `source` is the table that backs the edge (a `project.dataset.table`; the
+  converter references it, it does not create it). Its own key columns (`s_id`,
+  `c_id`) are named here so they need not match the nodes' keys.
 - `source_key`/`destination_key` are that table's columns joining to the `from`
   / `to` node. They become the `SOURCE`/`DESTINATION KEY`, and each must have the
   same number of columns as the native `from_columns`/`to_columns` it references.
 - `primary_key` (the edge `KEY`) is optional; it defaults to `source_key` and
   `destination_key` combined, with duplicates removed.
-- `fields` are edge properties — columns of the through-table that describe the
+- `fields` are edge properties — columns of that backing table that describe the
   link (a grade, an enrolment date) — rendered exactly as a node's fields and
   validated with the same `OSIField` model.
 - A relationship has no `description` field of its own, so its human description
   is authored as `ai_context.instructions` and rendered on the edge's label.
-- A structurally invalid many-to-many relationship (a missing/malformed
-  `source`, a non-list `source_key`/`destination_key`, or a join-column arity
-  mismatch) raises a `ConversionError`; an edge whose endpoint node has no
-  `primary_key` is dropped with a warning, as a dangling foreign-key edge is.
+
+**No `source` means it is not many-to-many.** The relationship stays a
+many-to-one foreign-key edge, and its extension (if any) contributes only
+`fields`. Because the M:N-only keys `source_key`, `destination_key`, and
+`primary_key` are meaningless without a `source`, supplying them without one is a
+`ConversionError` — the converter fails loudly on the ambiguous intent rather
+than silently emitting a one-to-many edge. A many-to-many edge that is otherwise
+malformed (a missing/malformed `source`, a non-list `source_key`/
+`destination_key`, or a join-column arity mismatch) likewise raises; an edge
+whose endpoint node has no `primary_key` is dropped with a warning, as a dangling
+foreign-key edge is.
 
 **Consume a many-to-many edge with `MATCH`, not `GRAPH_EXPAND`.** `GRAPH_EXPAND`
 flattens a foreign-key hierarchy and only walks many-to-one / one-to-one edges;
@@ -455,10 +435,6 @@ a many-to-many edge, and its single-root check (a `GRAPH_EXPAND` concern) does
 not apply to a graph whose edges are many-to-many.
 
 ### Metric → measure
-
-See [Metrics and measures](#metrics-and-measures) below.
-
-## Metrics and measures
 
 A metric becomes a `MEASURE()` on the single node its aggregate references. The
 converter finds that node by parsing the expression with sqlglot and reading the
@@ -500,7 +476,8 @@ Placement follows the number of datasets the expression references:
   COUNT(DISTINCT customer.y)`) → **skipped with a warning**. A single measure
   binds to one table's key, so a genuinely cross-table metric cannot be one
   measure. Compute it at query time from its component measures via `GRAPH_EXPAND`
-  + `AGG` (below), or wait for native BigQuery measure features to cover it.
+  + `AGG` (see [Query the graph and measures](#query-the-graph-and-measures)), or
+  wait for native BigQuery measure features to cover it.
 - **No dataset** (e.g. `COUNT(*)` with no qualifier) → **skipped with a
   warning**, because there is no node to attach it to.
 
@@ -508,7 +485,12 @@ This is a deliberate one-to-one mapping onto the native feature: the converter
 does not decompose composite metrics or synthesize SQL views to fake them. The
 skipped set shrinks as BigQuery's measure surface grows.
 
-## Deploying the DDL
+## Run it in BigQuery
+
+The converter's job ends at the DDL. This section is the other half of the loop —
+getting that DDL into BigQuery and querying what it creates.
+
+### Deploy the DDL
 
 The emitted statement is standard GoogleSQL DDL. Run it any way you run SQL:
 
@@ -537,7 +519,7 @@ dataset-qualified — the converter backtick-quotes a dotted name as a path:
 The `CREATE OR REPLACE` form makes re-deploys idempotent. Node/edge tables must
 already exist — the converter references them, it does not create them.
 
-## Querying the graph and measures
+### Query the graph and measures
 
 Once deployed, query the graph two ways.
 
@@ -598,7 +580,58 @@ Useful extras:
   console). Editing the underlying tables does not invalidate a cached
   `GRAPH_EXPAND` result, so caching can return stale rows.
 
-## Requirements
+## Reference
+
+Look-up material once you know the shape of things: the entry points (CLI and
+Python), the hard requirements, the by-design limitations, and every warning the
+converter can emit.
+
+### CLI
+
+```
+ossie-bigquery export -i <model.yaml> [-o <graph.sql>]
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `-i`, `--input` | input Apache Ossie YAML file (required) |
+| `-o`, `--output` | output `.sql` file; **omit for stdout** |
+
+- With no `-o`, the result goes to **stdout**, so you can pipe it:
+  ```bash
+  ossie-bigquery export -i sales.yaml | bq query --use_legacy_sql=false --nouse_cache
+  ```
+- Conversions that drop information print **warnings to stderr** and keep going
+  (see [Warnings](#warnings)). Redirect them away with `2>/dev/null`, or capture
+  them with `2> warnings.txt`.
+- Any input that breaks a hard [requirement](#requirements) raises a
+  `ConversionError`; the CLI prints `Error: …` to stderr and exits `1`.
+
+### Python API
+
+The conversion function is a pure `str -> str`; do file I/O yourself.
+
+```python
+import warnings
+from ossie_bigquery import convert_ossie_to_bq_graph, ConversionError
+
+with open("sales.yaml") as fh:
+    model = fh.read()
+
+try:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        ddl = convert_ossie_to_bq_graph(model)
+    for w in caught:
+        print("dropped:", w.message)   # e.g. a cross-dataset metric that was skipped
+except ConversionError as e:
+    raise SystemExit(f"cannot convert: {e}")
+
+with open("sales_graph.sql", "w") as fh:
+    fh.write(ddl)
+```
+
+### Requirements
 
 These are hard requirements — violating one raises a `ConversionError`:
 
@@ -612,10 +645,10 @@ These are hard requirements — violating one raises a `ConversionError`:
   (node) name — a graph's node and edge labels share one namespace.
 - A many-to-many relationship's `relationship.source_key`,
   `destination_key`, and `primary_key` require a `relationship.source` (the
-  through-table); supplied without it, they are treated as an error rather than
-  silently emitting a one-to-many edge.
+  edge's backing table); supplied without it, they are treated as an error rather
+  than silently emitting a one-to-many edge.
 
-## Limitations
+### Limitations
 
 - **Export only.** There is no BigQuery Graph DDL → Apache Ossie import, by
   design (matching the other export-only spokes). Ossie is the authoring
@@ -629,7 +662,7 @@ These are hard requirements — violating one raises a `ConversionError`:
   `project.dataset.table` identifier — a graph node cannot be backed by a
   subquery. A non-identifier source is warned about.
 - **Single-table measures only.** Cross-dataset or dataset-less metrics are
-  skipped with a warning (see [Metrics and measures](#metrics-and-measures)).
+  skipped with a warning (see [Metric → measure](#metric--measure)).
 - **Exactly one root.** For a foreign-key hierarchy, BigQuery's `GRAPH_EXPAND`
   needs exactly one root node table — one whose `KEY` is referenced by no edge.
   The converter warns (but still emits) if such a graph has zero or several
@@ -641,7 +674,7 @@ These are hard requirements — violating one raises a `ConversionError`:
   up automatically. An expression given only in a dialect sqlglot does not know
   (a non-SQL one), or in no dialect at all, is skipped with a warning.
 
-## Warnings reference
+### Warnings
 
 Warnings go to stderr; the conversion still produces output. Each names the
 element it concerns in brackets, e.g. `[customer_lifetime_value] metric spans …`.
