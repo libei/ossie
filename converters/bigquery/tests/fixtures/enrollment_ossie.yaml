@@ -16,22 +16,23 @@
 # under the License.
 
 # A many-to-many graph. A student can enroll in many courses and a course can
-# hold many students; a foreign key cannot say that, so the link lives in its
-# own through-table, `enrollment` (one row per (student, course) pair).
+# hold many students; a foreign key cannot say that, so the link is stored in
+# its own association table, `enrollment` (one row per (student, course) pair),
+# which BigQuery declares as the graph's EDGE TABLE.
 #
 # Every edge is a `relationship`, whatever its cardinality, so the many-to-many
 # edge lives in the `relationships:` block alongside any one-to-many edge. The
 # native relationship fields name the two node endpoints -- `from`/`to` are the
 # nodes, and `from_columns`/`to_columns` are the columns referenced ON those
-# nodes. The one thing the core spec cannot express yet -- the through-table --
-# rides in a Google-owned `relationship` custom extension: its `source` (the
-# through-table), `primary_key`, and the `source_key`/`destination_key` columns
-# in that table that join to the `from`/`to` node. `from` renders as BigQuery's
-# SOURCE and `to` as its DESTINATION. The through-table appears only as
-# `source`; it is never a dataset, because in BigQuery Graph a dataset is an
-# entity (a node), not a relationship. The junction's own columns (`s_id`,
-# `c_id`) are deliberately named differently from the nodes' keys to show that
-# the two are distinct.
+# nodes. The one thing the core spec cannot express yet -- the table that backs
+# the edge -- rides in a Google-owned `relationship` custom extension: its
+# `source` (that edge table), `primary_key`, and the `source_key`/
+# `destination_key` columns in that table that join to the `from`/`to` node.
+# `from` renders as BigQuery's SOURCE and `to` as its DESTINATION. The edge's
+# backing table appears only as `source`; it is never a `dataset`, because in
+# BigQuery Graph a dataset is an entity (a node), not a relationship. The edge
+# table's own columns (`s_id`, `c_id`) are deliberately named differently from
+# the nodes' keys to show that the two are distinct.
 #
 # Descriptions and AI context are set on every object that supports them, as the
 # Apache Ossie examples do. A relationship has no `description` field (only
@@ -107,8 +108,8 @@ semantic_model:
 
     relationships:
       # The many-to-many edge. Native fields name the two node endpoints; the
-      # GOOGLE `relationship` extension supplies the through-table the current
-      # spec cannot express yet.
+      # GOOGLE `relationship` extension supplies the edge's backing table, which
+      # the core spec cannot name yet.
       - name: enrolled_in
         from: student
         from_columns: [student_id]      # REFERENCES student (student_id)
@@ -119,17 +120,25 @@ semantic_model:
           synonyms:
             - takes
             - registered for
-        # The through-table rides here, in a GOOGLE-vendored `relationship`
-        # extension -- an opaque JSON string the core spec carries through
-        # untouched. The converter reads these keys:
-        #   source          -- the junction/through-table (campus.public.enrollment).
-        #                       Its presence is what marks this edge many-to-many;
-        #                       a relationship with no `source` is a plain 1:M FK.
-        #   primary_key     -- the junction's own key, used to de-duplicate rows.
-        #   source_key      -- junction column(s) that join to the `from` node
+        # The edge's backing table rides here, in a GOOGLE-vendored
+        # `relationship` extension -- an opaque JSON string the core spec carries
+        # through untouched. The converter reads these keys:
+        #   source          -- the table backing the edge (campus.public.enrollment).
+        #                       Its presence is the ONLY thing that makes this a
+        #                       many-to-many edge. With NO `source` the converter
+        #                       does not treat the relationship as many-to-many at
+        #                       all: it stays an ordinary one-to-many foreign-key
+        #                       edge (from `from_columns` to `to_columns`), and
+        #                       this extension may then carry only `fields`. See
+        #                       the orders fixture for that no-source form.
+        #                       Supplying the source_key/destination_key/
+        #                       primary_key keys below WITHOUT a `source` is an
+        #                       error, not a silent fallback.
+        #   source_key      -- edge-table column(s) that join to the `from` node
         #                       (student). Rendered as BigQuery's SOURCE KEY.
-        #   destination_key -- junction column(s) that join to the `to` node
+        #   destination_key -- edge-table column(s) that join to the `to` node
         #                       (course). Rendered as BigQuery's DESTINATION KEY.
+        #   primary_key     -- the edge table's own key, used to de-duplicate rows.
         #   fields          -- edge properties, same shape as a node `fields`
         #                       entry; they become PROPERTIES on the edge table.
         # NOTE: `#` comments cannot live inside the `data: |` block below -- YAML

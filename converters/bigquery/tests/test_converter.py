@@ -595,6 +595,19 @@ def test_edge_field_renders_as_edge_property():
   assert re.search(r"^\s+quantity\s*$", out, re.MULTILINE)
 
 
+def test_extension_without_source_is_one_to_many():
+  # An extension carrying only `fields` (no `source`) is NOT many-to-many: the
+  # relationship stays an ordinary one-to-many foreign-key edge backed by the
+  # `from` table -- SOURCE KEY is that table's own primary key referencing
+  # itself -- and the extension only adds edge properties. `source` is the sole
+  # marker of a many-to-many edge; without it the converter does not fall back
+  # to a through-table shape.
+  out = _convert(_two_ds(rel_extra=_edge_fields_ext([_field("quantity")])))
+  assert "`c.s.orders` AS o_to_c" in out
+  assert "SOURCE KEY (order_id) REFERENCES orders (order_id)" in out
+  assert "DESTINATION KEY (cust_id) REFERENCES customer (c_id)" in out
+
+
 def test_computed_edge_field_uses_expr_as_name():
   out = _convert(
       _two_ds(rel_extra=_edge_fields_ext([_field("total", "price * qty")]))
