@@ -1,0 +1,179 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# A many-to-many graph. A student can enroll in many courses and a course can
+# hold many students; a foreign key cannot say that, so the link is stored in
+# its own association table, `enrollment` (one row per (student, course) pair),
+# which BigQuery declares as the graph's EDGE TABLE.
+#
+# Every edge is a `relationship`, whatever its cardinality, so the many-to-many
+# edge lives in the `relationships:` block alongside any one-to-many edge. The
+# native relationship fields name the two node endpoints -- `from`/`to` are the
+# nodes, and `from_columns`/`to_columns` are the columns referenced ON those
+# nodes. The one thing the core spec cannot express yet -- the table that backs
+# the edge -- rides in a Google-owned `relationship` custom extension: its
+# `source` (that edge table), `primary_key`, and the `source_key`/
+# `destination_key` columns in that table that join to the `from`/`to` node.
+# `from` renders as BigQuery's SOURCE and `to` as its DESTINATION. The edge's
+# backing table appears only as `source`; it is never a `dataset`, because in
+# BigQuery Graph a dataset is an entity (a node), not a relationship. The edge
+# table's own columns (`s_id`, `c_id`) are deliberately named differently from
+# the nodes' keys to show that the two are distinct.
+#
+# Descriptions and AI context are set on every object that supports them, as the
+# Apache Ossie examples do. A relationship has no `description` field (only
+# nodes, fields, and metrics do), so its human description rides in
+# `ai_context.instructions`.
+
+version: "0.2.0.dev0"
+
+semantic_model:
+  - name: enrollment_graph
+    description: Students and the courses they enroll in
+    ai_context:
+      synonyms:
+        - course enrollment graph
+        - registrations
+
+    datasets:
+      - name: student
+        source: campus.public.student
+        primary_key: [student_id]
+        description: A person enrolled at the school
+        ai_context:
+          synonyms:
+            - students
+            - learners
+        fields:
+          - name: student_id
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: student_id
+            description: Unique identifier for the student
+            ai_context:
+              synonyms:
+                - student number
+          - name: student_name
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: student_name
+            description: Student full name
+            ai_context:
+              synonyms:
+                - name
+
+      - name: course
+        source: campus.public.course
+        primary_key: [course_id]
+        description: A course students can enroll in
+        ai_context:
+          synonyms:
+            - courses
+            - classes
+        fields:
+          - name: course_id
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: course_id
+            description: Unique identifier for the course
+            ai_context:
+              synonyms:
+                - course number
+          - name: title
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: title
+            description: Course title
+            ai_context:
+              synonyms:
+                - course name
+
+    relationships:
+      # The many-to-many edge. Native fields name the two node endpoints; the
+      # GOOGLE `relationship` extension supplies the edge's backing table, which
+      # the core spec cannot name yet.
+      - name: enrolled_in
+        from: student
+        from_columns: [student_id]      # REFERENCES student (student_id)
+        to: course
+        to_columns: [course_id]         # REFERENCES course (course_id)
+        ai_context:
+          instructions: A student's enrollment in a course
+          synonyms:
+            - takes
+            - registered for
+        # The edge's backing table rides here, in a GOOGLE-vendored
+        # `relationship` extension -- an opaque JSON string the core spec carries
+        # through untouched. The converter reads these keys:
+        #   source          -- the table backing the edge (campus.public.enrollment).
+        #                       Its presence is the ONLY thing that makes this a
+        #                       many-to-many edge. With NO `source` the converter
+        #                       does not treat the relationship as many-to-many at
+        #                       all: it stays an ordinary one-to-many foreign-key
+        #                       edge (from `from_columns` to `to_columns`), and
+        #                       this extension may then carry only `fields`. See
+        #                       the orders fixture for that no-source form.
+        #                       Supplying the source_key/destination_key/
+        #                       primary_key keys below WITHOUT a `source` is an
+        #                       error, not a silent fallback.
+        #   source_key      -- edge-table column(s) that join to the `from` node
+        #                       (student). Rendered as BigQuery's SOURCE KEY.
+        #   destination_key -- edge-table column(s) that join to the `to` node
+        #                       (course). Rendered as BigQuery's DESTINATION KEY.
+        #   primary_key     -- the edge table's own key, used to de-duplicate rows.
+        #   fields          -- edge properties, same shape as a node `fields`
+        #                       entry; they become PROPERTIES on the edge table.
+        # NOTE: `#` comments cannot live inside the `data: |` block below -- YAML
+        # keeps block-scalar lines verbatim, so any `#` there would become part
+        # of the JSON and break it. Hence this legend sits outside the block.
+        custom_extensions:
+          - vendor_name: GOOGLE
+            data: |
+              {
+                "relationship": {
+                  "source": "campus.public.enrollment",
+                  "primary_key": ["s_id", "c_id"],
+                  "source_key": ["s_id"],
+                  "destination_key": ["c_id"],
+                  "fields": [
+                    {
+                      "name": "grade",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "grade"}
+                        ]
+                      },
+                      "description": "Final grade the student earned",
+                      "ai_context": {"synonyms": ["mark", "score"]}
+                    },
+                    {
+                      "name": "enrolled_on",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "enrolled_on"}
+                        ]
+                      },
+                      "description": "Date the student enrolled in the course",
+                      "ai_context": {"synonyms": ["enrollment date"]}
+                    }
+                  ]
+                }
+              }

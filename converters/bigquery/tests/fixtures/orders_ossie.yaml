@@ -1,0 +1,148 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+# A tiny orders graph whose edge carries its own properties. Every object -- the
+# model, the two nodes, their fields, the edge, and each edge property -- carries
+# a description and a structured ai_context (synonyms), highlighting how Ossie's
+# semantic metadata maps onto BigQuery's native OPTIONS(description=...,
+# synonyms=[...]) everywhere, edge properties included.
+#
+# BigQuery edge tables can hold PROPERTIES just like node tables, but the core
+# spec has no field slot on a relationship yet, so the edge properties are
+# declared under a Google-owned `relationship` custom extension whose `fields`
+# list mirrors the core `fields` shape verbatim -- exactly the form a
+# spec-native `relationships[].fields` would take, per-field description and
+# ai_context and all. The edge properties (order_date, order_total) are columns
+# of the `from` base table that backs the edge, and are deliberately not repeated
+# as node fields on `orders`, so the emitted node and edge PROPERTIES stay
+# distinct.
+
+version: "0.2.0.dev0"
+
+semantic_model:
+  - name: orders_graph
+    description: Orders placed by customers
+    ai_context:
+      synonyms:
+        - order graph
+        - purchases
+
+    datasets:
+      - name: orders
+        source: shop.public.orders
+        primary_key: [order_id]
+        description: An order placed by a customer
+        ai_context:
+          synonyms:
+            - sales orders
+            - purchase orders
+        fields:
+          - name: order_id
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: order_id
+            description: Unique identifier for the order
+            ai_context:
+              synonyms:
+                - order number
+          - name: customer_id
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: customer_id
+            description: The customer who placed the order
+            ai_context:
+              synonyms:
+                - buyer id
+
+      - name: customer
+        source: shop.public.customer
+        primary_key: [customer_id]
+        description: A customer who places orders
+        ai_context:
+          synonyms:
+            - customers
+            - buyers
+        fields:
+          - name: customer_id
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: customer_id
+            description: Unique identifier for the customer
+            ai_context:
+              synonyms:
+                - customer number
+          - name: customer_name
+            expression:
+              dialects:
+                - dialect: BIGQUERY
+                  expression: customer_name
+            description: Customer full name
+            ai_context:
+              synonyms:
+                - name
+
+    relationships:
+      - name: placed_by
+        from: orders
+        to: customer
+        from_columns: [customer_id]
+        to_columns: [customer_id]
+        ai_context:
+          synonyms:
+            - ordered by
+            - purchased by
+        # This is an ordinary one-to-many edge (no `source`), but it still needs
+        # a place to declare its own PROPERTIES, which the core relationship
+        # shape has no slot for yet. So the GOOGLE `relationship` extension here
+        # carries just `fields` -- edge-property definitions in the exact shape a
+        # node's `fields` entry takes (name, expression, description, ai_context).
+        # They become PROPERTIES on the edge table. Because there is no `source`
+        # key, the converter treats the edge as 1:M, not many-to-many.
+        # NOTE: `#` comments cannot go inside the `data: |` block below -- YAML
+        # keeps block-scalar lines verbatim, so this note sits outside it.
+        custom_extensions:
+          - vendor_name: GOOGLE
+            data: |
+              {
+                "relationship": {
+                  "fields": [
+                    {
+                      "name": "order_date",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "order_date"}
+                        ]
+                      },
+                      "description": "When the order was placed",
+                      "ai_context": {"synonyms": ["purchase date", "ordered on"]}
+                    },
+                    {
+                      "name": "order_total",
+                      "expression": {
+                        "dialects": [
+                          {"dialect": "BIGQUERY", "expression": "order_total"}
+                        ]
+                      },
+                      "description": "Total amount of the order",
+                      "ai_context": {"synonyms": ["order amount", "basket value"]}
+                    }
+                  ]
+                }
+              }
